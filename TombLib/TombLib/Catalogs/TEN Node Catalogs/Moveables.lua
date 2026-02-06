@@ -459,16 +459,28 @@ end
 -- !Arguments "25, Boolean, With rotation"
 -- !Arguments "NewLine, Moveables, Moveable to move"
 -- !Arguments "NewLine, Moveables, Moveable to get position and rotation from"
+-- !Arguments "NewLine, Vector3, 75, { TEN.Vec3(0,0,0) }, Offset relative to source moveable (local coordinates: X=right; Y=up; Z=forward)"
 
-LevelFuncs.Engine.Node.SetMoveablePositionToAnotherMoveable = function(rotate, destMoveable, srcMoveable)
-	local src = TEN.Objects.GetMoveableByName(srcMoveable)
-	local dest = TEN.Objects.GetMoveableByName(destMoveable)
+LevelFuncs.Engine.Node.SetMoveablePositionToAnotherMoveable = function(rotate, destMoveable, srcMoveable, offset)
+    local src = TEN.Objects.GetMoveableByName(srcMoveable)
+    local dest = TEN.Objects.GetMoveableByName(destMoveable)
 
-	dest:SetPosition(src:GetPosition())
+    local pos = src:GetPosition()
 
-	if (rotate == true) then
-		dest:SetRotation(src:GetRotation())
-	end
+    if offset then
+        local ang = math.rad(src:GetRotation().y)
+        local rx = offset.x * math.cos(ang) + offset.z * math.sin(ang)
+        local rz = -offset.x * math.sin(ang) + offset.z * math.cos(ang)
+        pos.x = pos.x + rx
+        pos.y = pos.y + offset.y
+        pos.z = pos.z + rz
+    end
+
+    dest:SetPosition(pos)
+
+    if (rotate == true) then
+        dest:SetRotation(src:GetRotation())
+    end
 end
 
 -- !Name "Shift moveable towards its direction"
