@@ -129,6 +129,67 @@ end
 
 -- !Name "Attach camera to moveable"
 -- !Section "View"
+-- !Description "Attaches game camera behind a moveable mesh and aims it forward from the same mesh."
+-- !Arguments "NewLine, Moveables, 70, Moveable to attach camera to" , "Number, 30, [ 0 | 50 | 0 ], Mesh number to attach camera to"
+-- !Arguments "NewLine, Vector3, [ -8192 | 8192 | 0 | 32 | 256 ], {TEN.Vec3(0,0,-512)}, Local camera offset from mesh"
+
+LevelFuncs.Engine.Node.AttachCameraToMoveable = function(moveableName, cameraMesh, offset)
+    local moveable = TEN.Objects.GetMoveableByName(moveableName)
+    local cameraName = moveableName .. "_BehindCamera"
+    local targetName = moveableName .. "_ForwardCameraTarget"
+    offset = offset or Vec3(0,0,-512)
+    local jointPos = moveable:GetJointPosition(cameraMesh)
+    local forward = Rotation(0, moveable:GetRotation().y, 0):Direction()
+    forward.y = 0
+    forward = forward:Normalize()
+    local right = Vec3(forward.z, 0, -forward.x)
+    local cameraPos = Vec3(
+        jointPos.x + right.x * offset.x + forward.x * offset.z,
+        jointPos.y + offset.y,
+        jointPos.z + right.z * offset.x + forward.z * offset.z)
+    local targetPos = Vec3(jointPos.x + forward.x * 1024, cameraPos.y, jointPos.z + forward.z * 1024)
+    local targetRoom = moveable:GetRoomNumber()
+
+    LevelVars.Engine.AttachedMoveableCamera = { FramesSinceCall = 0 }
+
+    if (LevelFuncs.Engine.Node.__AttachedMoveableCameraIdleCheck == nil) then
+        LevelFuncs.Engine.Node.__AttachedMoveableCameraIdleCheck = function()
+            if (LevelVars.Engine.AttachedMoveableCamera == nil) then
+                return
+            end
+
+            local data = LevelVars.Engine.AttachedMoveableCamera
+            data.FramesSinceCall = (data.FramesSinceCall or 0) + 1
+
+            if (data.FramesSinceCall > 1) then
+                LevelVars.Engine.AttachedMoveableCamera = nil
+                ResetObjCamera()
+            end
+        end
+    end
+
+    if (LevelVars.Engine.AttachedMoveableCameraIdleCallbackAdded ~= true) then
+        TEN.Logic.AddCallback(TEN.Logic.CallbackPoint.POSTCONTROLPHASE, LevelFuncs.Engine.Node.__AttachedMoveableCameraIdleCheck)
+        LevelVars.Engine.AttachedMoveableCameraIdleCallbackAdded = true
+    end
+
+    if not TEN.Objects.IsNameInUse(cameraName) then
+        Moveable(TEN.Objects.ObjID.CAMERA_TARGET, cameraName, cameraPos, Rotation(0,0,0), targetRoom)
+    end
+
+    if not TEN.Objects.IsNameInUse(targetName) then
+        Moveable(TEN.Objects.ObjID.CAMERA_TARGET, targetName, targetPos, Rotation(0,0,0), targetRoom)
+    end
+
+    local cameraObject = TEN.Objects.GetMoveableByName(cameraName)
+    local targetObject = TEN.Objects.GetMoveableByName(targetName)
+    cameraObject:SetPosition(cameraPos, true)
+    targetObject:SetPosition(targetPos, true)
+    cameraObject:AttachObjCamera(0, targetObject, 0)
+end
+
+-- !Name "Attach camera to moveable"
+-- !Section "View"
 -- !Description "Attaches game camera to a specific moveable."
 -- !Arguments "NewLine, Moveables, 70, Source moveable" , "Number, 30 , [ 0 | 50 | 0 ] , Mesh number of source moveable to attach camera target to"
 -- !Arguments "NewLine, Moveables, 70, Target moveable" , "Number, 30 , [ 0 | 50 | 0 ] , Mesh number of target moveable to attach camera target to"
