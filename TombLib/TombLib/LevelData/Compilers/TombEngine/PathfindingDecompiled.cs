@@ -57,6 +57,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
         // FLOOR PROPERTIES
         // =========================================================================================
         public int Height;         // Average floor height (room.Position.Y + average of 4 corners)
+        public int MonkeyCeiling;  // Real ceiling height for monkey swing sectors.
         public int OverlapIndex;   // Index into overlap array (-1 if no overlaps)
         public bool Slope;         // True if floor is too steep for most enemies (gradient >= 3 clicks)
 
@@ -100,6 +101,22 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
         public class OverlapFlags
         {
+            // FLIP-STATE VALIDITY (runtime filter).
+            //
+            // The compiler runs two overlap passes (Pass 1 = unflipped geometry,
+            // Pass 2 = flipped geometry). For pairs whose adjacency check yields
+            // the same result in both passes, only ONE physical overlap entry is
+            // emitted but it gets BOTH flags. For pairs where alt geometry adds
+            // or removes a wall (= overlap valid in one state only), the entry
+            // carries only the matching flag.
+            //
+            // Runtime BFS (CanExpandToBox) reads FlipStatus and rejects entries
+            // missing the matching validity flag. Prevents the classic flipmap
+            // bug: a Pass 1 base-geometry overlap incorrectly used in alt state
+            // routes BFS through a wall that exists only in alt.
+            public const int UnflippedValid = 0x0001;
+            public const int FlippedValid   = 0x0002;
+
             public const int Jump = 0x0800;
             public const int Monkey = 0x2000;
             public const int AmphibiousTraversable = 0x4000;
@@ -139,6 +156,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
         /// Boxes with monkey swing get the MONKEY_BOX_FLAG.
         /// </summary>
         private bool dec_monkey;
+        private int dec_monkeyCeiling;
 
         /// <summary>
         /// Current flip state being processed.
@@ -151,6 +169,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
         /// Used to set the JUMP_BIT (0x0800) flag on the overlap.
         /// </summary>
         private bool dec_jump;
+
 
         /// <summary>
         /// Current room being processed.
@@ -191,6 +210,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
         /// Returns from Dec_GetHeight when a sector cannot be walked on.
         /// </summary>
         private const int _noHeight = int.MinValue + byte.MaxValue;
+        private const int _noMonkeyCeiling = int.MinValue;
+        private const int _monkeySwingCeilingLimit = 320;
 
 
         /// <summary>
@@ -334,14 +355,80 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // PRE-PROCESS: Set flip flags for boxes in non-flipped rooms
             // ===================================================================================
             // Boxes in rooms without flip pairs should be accessible from both flip states.
-            // This is a workaround because TombEditor doesn't support FlipAllRooms().
-            // In original code, FlipAllRooms() would cause these boxes to be processed twice.
+            // Primary path: Dec_GetBox now stamps both Unflipped and Flipped on boxes whose
+            // owning room is not Alternated, so this loop is normally a no-op. It is kept
+            // as a safety net for any code path that might add a box without going through
+            // the room.Alternated check (e.g. third-party patches that bypass Dec_GetBox).
             for (int k = 0; k < dec_boxes.Count; k++)
             {
                 if (!_tempRooms[dec_boxes[k].Room].Flipped)
                 {
                     dec_boxes[k].Unflipped = true;
                     dec_boxes[k].Flipped = true;
+                }
+            }
+
+            // ===================================================================================
+            // PRE-PROCESS: Merge flip-state flags between flip-pair partner boxes
+            // ===================================================================================
+            // When a Pass 0 (base) box and a Pass 1 (alt) box geometrically overlap (2D bbox
+            // intersection) AND share the same floor height, they represent the same physical
+            // floor area in different flip states -- one is the base version, the other the
+            // alternate. In every flip state at runtime the underlying sectors point to one or
+            // the other of these boxes, so they must logically belong to the same flip-state
+            // zone cluster.
+            //
+            // Without this merge, a base-only box (Unflipped=true, Flipped=false) that shares
+            // area with an alt-only box becomes zone-isolated in the flipped pass. Creatures
+            // that pass between the base box (via a non-alternated neighbour room) and the alt
+            // box (in the active flipped room) trigger ZONE_MISMATCH and get pushed back. This
+            // is the "yeti vault" symptom: vault triggers, creature climbs up onto a sector
+            // whose box is the base-only floor box, runtime sees its zone differs from the
+            // creature's stored box in cluster 1, pushes it back.
+            //
+            // O(N^2) but N is hundreds at most -- negligible relative to overall compile time.
+            for (int a = 0; a < dec_boxes.Count; a++)
+            {
+                var boxA = dec_boxes[a];
+                // Skip boxes that already carry both flags -- nothing to learn from a partner.
+                if (boxA.Unflipped && boxA.Flipped)
+                    continue;
+
+                for (int b = 0; b < dec_boxes.Count; b++)
+                {
+                    if (a == b)
+                        continue;
+
+                    var boxB = dec_boxes[b];
+
+                    // Must be same floor height -- different heights mean different physical
+                    // floors (e.g. a stair box at one click up does NOT pair with the surface
+                    // it sits on).
+                    if (boxA.Height != boxB.Height)
+                        continue;
+
+                    // STRICT: bounds must be IDENTICAL, not just overlapping. Two boxes
+                    // representing the same physical area in different flip states will
+                    // have the same bbox -- if one box's bounds are a strict subset of the
+                    // other's, they cover DIFFERENT physical extents and are NOT flip
+                    // partners. Example bug they previously caused: in alt geometry a 5x1
+                    // sector strip becomes a staircase (1-sector boxes at varying heights);
+                    // the base 5-sector box (Unflipped only) would falsely get Flipped=true
+                    // from a 1-sector alt box at one end that happened to share a sector
+                    // and matched its height. BFS in alt then routed creatures THROUGH the
+                    // base box's physical extent, into the alt-only blocks.
+                    if (boxA.Xmin != boxB.Xmin || boxA.Xmax != boxB.Xmax)
+                        continue;
+                    if (boxA.Zmin != boxB.Zmin || boxA.Zmax != boxB.Zmax)
+                        continue;
+
+                    // True flip-pair partners (identical bounds + height). Merge flags.
+                    dec_boxes[a].Unflipped |= boxB.Unflipped;
+                    dec_boxes[a].Flipped   |= boxB.Flipped;
+
+                    // Early-out if A is now fully flagged.
+                    if (dec_boxes[a].Unflipped && dec_boxes[a].Flipped)
+                        break;
                 }
             }
 
@@ -354,6 +441,11 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 dec_boxes[i].OverlapIndex = -1;  // Reset overlap index
 
                 int numOverlapsAdded = 0;
+
+                // Track Pass 1 entries by target box so Pass 2 can merge into the
+                // existing entry (set FlippedValid) instead of adding a duplicate.
+                // Key = j (target box index), Value = index into dec_overlaps.
+                var pass1Index = new Dictionary<int, int>();
 
                 // ===============================================================================
                 // PASS 1: Check overlaps in UNFLIPPED state
@@ -381,10 +473,11 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                     if (dec_boxes[i].OverlapIndex == -1)
                                         dec_boxes[i].OverlapIndex = dec_overlaps.Count;
 
-                                    // Create overlap entry
+                                    // Create overlap entry tagged as valid in UNFLIPPED state.
                                     var overlap = new TombEngineOverlap
                                     {
-                                        Box = j
+                                        Box = j,
+                                        Flags = OverlapFlags.UnflippedValid
                                     };
 
                                     // Set capability flags based on Dec_CheckOverlap results
@@ -393,15 +486,33 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                     if (dec_monkey)
                                         overlap.Flags |= OverlapFlags.Monkey;  // MONKEY_BIT
 
-                                    // Set AmphibiousTraversable flag
-                                    // Water-Water: always traversable
-                                    // Land-Land or Water-Land: traversable if height diff <= 1 click
-                                    bool bothWater = (box1.Water && box2.Water) || (box1.Shallow && box2.Shallow);
+                                    // Set AmphibiousTraversable flag.
+                                    // Wet<->Wet (deep OR shallow water on either side): always
+                                    // traversable -- an amphibious creature swims/wades over the
+                                    // underwater floor step (it travels at the surface, so a deep
+                                    // floor next to shallow water is no obstacle). Previously a
+                                    // deep-water <-> shallow-water edge with a big floor step was
+                                    // NOT marked traversable, so a crocodile could get trapped in
+                                    // a deep pool and never swim to a shallow exit ramp.
+                                    // Dry<->Dry: floor step <= 1 click (normal land walking).
+                                    // Wet<->Dry (the WATERLINE climb-out): STRICTLY below 1 click.
+                                    // A flat shallow shelf sitting a full click under the shore
+                                    // is not physically climbable from the water -- the creature
+                                    // needs an INCLINED shallow sector whose floor rises to meet
+                                    // the land (its box height averages the slope, ~half a click,
+                                    // and passes the strict test). With <=, the flat ledge edge
+                                    // got flagged, zones merged across it, and the creature kept
+                                    // targeting enemies behind an exit it could never use.
+                                    bool box1Wet = box1.Water || box1.Shallow;
+                                    bool box2Wet = box2.Water || box2.Shallow;
                                     int heightDiff = Math.Abs(box1.Height - box2.Height);
+                                    bool crossesWaterline = box1Wet != box2Wet;
 
-                                    if (bothWater || heightDiff <= Clicks.ToWorld(1))
+                                    if ((box1Wet && box2Wet) ||
+                                        (crossesWaterline ? heightDiff < Clicks.ToWorld(1) : heightDiff <= Clicks.ToWorld(1)))
                                         overlap.Flags |= OverlapFlags.AmphibiousTraversable;
 
+                                    pass1Index[j] = dec_overlaps.Count;
                                     dec_overlaps.Add(overlap);
                                     numOverlapsAdded++;
                                 }
@@ -416,6 +527,19 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 // ===============================================================================
                 // PASS 2: Check overlaps in FLIPPED state
                 // ===============================================================================
+                // Previously skipped when both boxes carried Unflipped flag, on the assumption
+                // Pass 1 had already established the same overlap. That assumption is FALSE for
+                // boxes whose adjacency check straddles a portal into an alternated room:
+                // Pass 1 (dec_flipped=false) traverses base geometry; the same pair re-checked
+                // in Pass 2 (dec_flipped=true) traverses alt geometry. A new alt wall would
+                // make Pass 2 reject what Pass 1 accepted -- but the skip meant Pass 2 never
+                // ran, so the stale base overlap remained in the chain and BFS routed through
+                // alt walls.
+                //
+                // Now we always run Pass 2 for box1.Flipped. If the same (i,j) pair was
+                // already added in Pass 1, we OR in FlippedValid on the existing entry
+                // instead of duplicating. If Pass 1 didn't add it (or said no overlap), we
+                // emit a new entry tagged FlippedValid only.
                 if (box1.Flipped)
                 {
                     if (!dec_flipped)
@@ -433,18 +557,24 @@ namespace TombLib.LevelData.Compilers.TombEngine
                             // Only check if box2 also exists in flipped state
                             if (box2.Flipped)
                             {
-                                // Skip if already checked in unflipped pass
-                                // (both boxes have Unflipped flag = already processed)
-                                if (!(box1.Unflipped && box2.Unflipped))
+                                if (Dec_CheckOverlap(box1, box2))
                                 {
-                                    if (Dec_CheckOverlap(box1, box2))
+                                    if (pass1Index.TryGetValue(j, out int existingIdx))
+                                    {
+                                        // Pair already added by Pass 1; merge flip flag.
+                                        var existing = dec_overlaps[existingIdx];
+                                        existing.Flags |= OverlapFlags.FlippedValid;
+                                        dec_overlaps[existingIdx] = existing;
+                                    }
+                                    else
                                     {
                                         if (dec_boxes[i].OverlapIndex == -1)
                                             dec_boxes[i].OverlapIndex = dec_overlaps.Count;
 
                                         var overlap = new TombEngineOverlap
                                         {
-                                            Box = j
+                                            Box = j,
+                                            Flags = OverlapFlags.FlippedValid
                                         };
 
                                         if (dec_jump)
@@ -452,13 +582,17 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                         if (dec_monkey)
                                             overlap.Flags |= OverlapFlags.Monkey;
 
-                                        // Set AmphibiousTraversable flag
-                                        // Water-Water: always traversable
-                                        // Land-Land or Water-Land: traversable if height diff <= 1 click
-                                        bool bothWater = (box1.Water && box2.Water) || (box1.Shallow && box2.Shallow);
+                                        // Set AmphibiousTraversable flag (see Pass 1 comment).
+                                        // Wet<->Wet always traversable; Dry<->Dry step <= 1 click;
+                                        // Wet<->Dry (waterline climb-out) STRICTLY below 1 click --
+                                        // only an inclined shallow exit sector qualifies.
+                                        bool box1Wet = box1.Water || box1.Shallow;
+                                        bool box2Wet = box2.Water || box2.Shallow;
                                         int heightDiff = Math.Abs(box1.Height - box2.Height);
+                                        bool crossesWaterline = box1Wet != box2Wet;
 
-                                        if (bothWater || heightDiff <= Clicks.ToWorld(1))
+                                        if ((box1Wet && box2Wet) ||
+                                            (crossesWaterline ? heightDiff < Clicks.ToWorld(1) : heightDiff <= Clicks.ToWorld(1)))
                                             overlap.Flags |= OverlapFlags.AmphibiousTraversable;
 
                                         dec_overlaps.Add(overlap);
@@ -536,7 +670,10 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     int maskBounds = Sse2.MoveMask(cmpBounds.AsByte());
 
                     // All 4 bounds must match (0xFFFF = all 16 bytes equal)
-                    if (maskBounds == 0xFFFF && candidate.Height == box.Height)
+                    if (maskBounds == 0xFFFF &&
+                        candidate.Height == box.Height &&
+                        candidate.Monkey == box.Monkey &&
+                        (!box.Monkey || candidate.MonkeyCeiling == box.MonkeyCeiling))
                     {
                         boxIndex = i;
                         break;
@@ -554,7 +691,9 @@ namespace TombLib.LevelData.Compilers.TombEngine
                         dec_boxes[i].Xmax == box.Xmax &&
                         dec_boxes[i].Zmin == box.Zmin &&
                         dec_boxes[i].Zmax == box.Zmax &&
-                        dec_boxes[i].Height == box.Height)
+                        dec_boxes[i].Height == box.Height &&
+                        dec_boxes[i].Monkey == box.Monkey &&
+                        (!box.Monkey || dec_boxes[i].MonkeyCeiling == box.MonkeyCeiling))
                     {
                         boxIndex = i;
                         break;
@@ -578,10 +717,17 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 if (box.Water || box.Shallow)
                     dec_boxes[boxIndex].Room = box.Room;
 
-                // Duplicate found - update flags if needed
-                dec_boxes[boxIndex].Flipped |= box.Flipped;
-                dec_boxes[boxIndex].Water   |= box.Water;
-                dec_boxes[boxIndex].Shallow |= box.Shallow;
+                // Duplicate found - merge flags. Both Unflipped and Flipped are OR'd so
+                // that the order in which duplicates are encountered (e.g. base then
+                // alternate, or non-alternated room then alternated room) cannot lose
+                // a flag. Previously only Flipped was merged, which silently dropped
+                // Unflipped if a box from a non-alternated room was added AFTER a
+                // geometrically identical box from an alternate-side pass.
+                dec_boxes[boxIndex].Unflipped |= box.Unflipped;
+                dec_boxes[boxIndex].Flipped   |= box.Flipped;
+                dec_boxes[boxIndex].Water     |= box.Water;
+                dec_boxes[boxIndex].Shallow   |= box.Shallow;
+                dec_boxes[boxIndex].Monkey    |= box.Monkey;
             }
 
             return boxIndex;
@@ -668,6 +814,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             dec_checkUnderwater = true;
             dec_shallowWater = false;
             dec_monkey = false;
+            dec_monkeyCeiling = _noMonkeyCeiling;
             
             // ===================================================================================
             // GET INITIAL FLOOR HEIGHT AND PROPERTIES
@@ -684,8 +831,25 @@ namespace TombLib.LevelData.Compilers.TombEngine
             box.Room = dec_room;
             box.Water = dec_room.Properties.Type == RoomType.Water;
 
-            // Set flip state flags
-            if (dec_flipped)
+            // Set flip state flags.
+            //
+            // If the room is NOT part of a flip pair, the box logically exists in both
+            // flip states (the room's geometry never changes). Mark BOTH flags so the box
+            // is picked up as an overlap candidate in both Pass 1 (Unflipped) and Pass 2
+            // (Flipped) of Dec_BuildOverlaps, and likewise considered by zone generation in
+            // both passes. This is critical for cross-portal connectivity between a
+            // non-alternated room (e.g. a lower stack room) and the alternate of an
+            // adjacent alternated room (e.g. the flipped upper stack room with a
+            // repositioned ladder/stairs). Without this, a box in the non-alternated
+            // room would only carry Unflipped=true and Pass 2 would never pair it with
+            // boxes from the alternate room, producing the "creature bumps into the
+            // vertical portal after flipmap" symptom.
+            if (!dec_room.Alternated)
+            {
+                box.Unflipped = true;
+                box.Flipped = true;
+            }
+            else if (dec_flipped)
             {
                 box.Flipped = true;
             }
@@ -698,7 +862,12 @@ namespace TombLib.LevelData.Compilers.TombEngine
             if (dec_monkey)
             {
                 box.Monkey = true;
+                box.MonkeyCeiling = dec_monkeyCeiling;
                 monkeyInit = true;
+            }
+            else
+            {
+                box.MonkeyCeiling = _noMonkeyCeiling;
             }
 
             // Handle shallow water (water depth <= 1 click)
@@ -720,6 +889,15 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 box.Xmax = currentX + 1;
                 box.Zmax = currentZ + 1;
                 box.Splitter = true;
+
+                return true;
+            }
+            else if (monkeyInit)
+            {
+                box.Xmin = currentX;
+                box.Zmin = currentZ;
+                box.Xmax = currentX + 1;
+                box.Zmax = currentZ + 1;
 
                 return true;
             }
@@ -1078,8 +1256,16 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 if (sector.WallPortal == null)
                     break;
 
-                // Follow wall portal to adjoining room
+                // Follow wall portal to adjoining room. When processing the flipped pass
+                // and the adjoining room is itself alternated, descend into its alternate
+                // so geometry sampled across the portal matches the flip state we're
+                // currently building. Without this, the alt pass would silently read
+                // base-room sectors across wall portals, producing wrong heights and
+                // "connecting box" splits at the junction between flip-changed and
+                // unchanged geometry.
                 Room adjoiningRoom = sector.WallPortal.AdjoiningRoom;
+                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
+                    adjoiningRoom = adjoiningRoom.AlternateRoom;
 
                 dec_room = adjoiningRoom;
                 room = adjoiningRoom;
@@ -1107,7 +1293,12 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // Stops at water boundaries (water/land transition).
             while (room.GetFloorRoomConnectionInfo(new VectorInt2(localX, localZ), true).TraversableType == Room.RoomConnectionType.FullPortal)
             {
+                // Resolve adjoining room with respect to the current flip pass. If the
+                // adjoining room has an alternate and we're building flipped pathfinding
+                // data, descend into the alternate; otherwise stay on the base side.
                 Room adjoiningRoom = sector.FloorPortal.AdjoiningRoom;
+                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
+                    adjoiningRoom = adjoiningRoom.AlternateRoom;
 
                 // Stop at water boundary (don't cross water/land transition via floor portals)
                 if (room.Properties.Type == RoomType.Water != (adjoiningRoom.Properties.Type == RoomType.Water))
@@ -1222,7 +1413,16 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // If it's not a wall portal or is vertical toggle opacity 1
             if (sector.WallPortal is not null && sector.WallPortal.Opacity != PortalOpacity.SolidFaces)
             {
+                // Pick the correct side of the adjoining flip pair for this pass. During
+                // the flipped pass (dec_flipped == true) we want to read the alternate of
+                // the neighbour so that heights observed across a wall portal at a
+                // changed/unchanged junction reflect the same flip state that the
+                // surrounding box was generated in. Reading the base when dec_flipped is
+                // true would inject stale geometry at the junction.
                 adjoiningRoom = sector.WallPortal.AdjoiningRoom;
+                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
+                    adjoiningRoom = adjoiningRoom.AlternateRoom;
+
                 dec_room = adjoiningRoom;
                 dec_doorCheck = true;
 
@@ -1239,7 +1439,14 @@ namespace TombLib.LevelData.Compilers.TombEngine
             var connInfo = room.GetFloorRoomConnectionInfo(new VectorInt2(localX, localZ));
             while (sector.FloorPortal != null && connInfo.TraversableType != Room.RoomConnectionType.NoPortal)
             {
+                // Same flip-aware resolution as the wall-portal branch above. Without
+                // this, descending through a floor portal during the flipped pass would
+                // sample heights from the base of an alternated room below, producing
+                // an inconsistent floor value at the very sector that should connect
+                // changed and unchanged geometry.
                 adjoiningRoom = sector.FloorPortal.AdjoiningRoom;
+                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
+                    adjoiningRoom = adjoiningRoom.AlternateRoom;
 
                 if (sector.FloorPortal.Opacity == PortalOpacity.SolidFaces)
                 {
@@ -1336,9 +1543,15 @@ namespace TombLib.LevelData.Compilers.TombEngine
             }
 
             if ((sector.Flags & SectorFlags.Monkey) != 0)
+            {
                 dec_monkey = true;
+                dec_monkeyCeiling = ceiling;
+            }
             else
+            {
                 dec_monkey = false;
+                dec_monkeyCeiling = _noMonkeyCeiling;
+            }
 
             return height;
         }
@@ -1385,7 +1598,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (zMax == zMin - 1)
             {
-                dec_room = box.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1403,7 +1616,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (zMax == zMin - 2)
             {
-                dec_room = box.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1433,7 +1646,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (zMax == zMin - 1)
             {
-                dec_room = box.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1451,7 +1664,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (zMax == zMin - 2)
             {
-                dec_room = box.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1507,7 +1720,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (xMax == xMin - 1)
             {
-                dec_room = b.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1525,7 +1738,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (xMax == xMin - 2)
             {
-                dec_room = b.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1554,7 +1767,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (xMax == xMin - 1)
             {
-                dec_room = b.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1572,7 +1785,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (xMax == xMin - 2)
             {
-                dec_room = b.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1607,17 +1820,126 @@ namespace TombLib.LevelData.Compilers.TombEngine
         ///
         /// Tests all sectors along the shared edge to ensure they connect properly.
         /// </summary>
+        // Resolves a box.Room reference to the alternate version when we're in
+        // the flipped pass. This is critical for boxes that were merged via
+        // Dec_AddBox: the merge keeps the Room field from whichever pass first
+        // added the box (typically Pass 0 = base). Without this re-resolution,
+        // Pass 2 calls to Dec_ClampRoom / Dec_GetHeight using `dec_room = box.Room`
+        // read BASE geometry even when sampling for an alt-pass adjacency check.
+        // That lets Pass 2 accept overlaps where alt geometry actually walls them
+        // off -- exactly the "BFS routes through alt block" bug seen with merged
+        // upper-room boxes whose alt counterparts have raised floors.
+        [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+        private Room Dec_ResolveRoomForFlipPass(Room r)
+        {
+            if (dec_flipped && r != null && r.AlternateRoom != null)
+                return r.AlternateRoom;
+            return r;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+        private bool Dec_TestMonkeySwingOverlap(dec_TombEngine_box_aux box1, dec_TombEngine_box_aux box2)
+        {
+            if (!box1.Monkey || !box2.Monkey)
+                return false;
+
+            if (Math.Abs(box1.MonkeyCeiling - box2.MonkeyCeiling) > _monkeySwingCeilingLimit)
+                return false;
+
+            bool hasXOverlap = box1.Xmax > box2.Xmin && box1.Xmin < box2.Xmax;
+            bool hasZOverlap = box1.Zmax > box2.Zmin && box1.Zmin < box2.Zmax;
+
+            if (hasXOverlap && hasZOverlap)
+                return true;
+
+            return hasXOverlap && (box1.Zmax == box2.Zmin || box1.Zmin == box2.Zmax) ||
+                   hasZOverlap && (box1.Xmax == box2.Xmin || box1.Xmin == box2.Xmax);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public bool Dec_TestOverlapXmax(dec_TombEngine_box_aux test, dec_TombEngine_box_aux box)
         {
             int startZ = test.Zmin > box.Zmin ? test.Zmin : box.Zmin;
             int endZ = test.Zmax < box.Zmax ? test.Zmax : box.Zmax;
 
+            Room testRoom = Dec_ResolveRoomForFlipPass(test.Room);
+            Room boxRoom  = Dec_ResolveRoomForFlipPass(box.Room);
+
             for (int z = startZ; z < endZ; z++)
             {
-                dec_room = test.Room;
+                // Clamp for the test (own) side first so dec_doorCheck/splitter side
+                // effects mirror the original behaviour.
+                dec_room = testRoom;
 
                 if (!Dec_ClampRoom(test.Xmax - 1, z))
+                    return false;
+
+                // PORTAL-CONNECTIVITY CHECK: traverse wall portals from
+                // test.Room toward the box-side sector. If there is no real
+                // portal chain connecting them at this boundary, Dec_ClampRoom
+                // returns false and we reject the overlap. Without this guard
+                // two rooms whose world XZ rectangles merely touch (no portal
+                // between them) get a "phantom" overlap and BFS paths through
+                // walls.
+                if (test.Room != box.Room)
+                {
+                    dec_room = testRoom;
+                    if (!Dec_ClampRoom(test.Xmax, z))
+                        return false;
+
+                    // FLOOR-CONTINUITY CHECK (water phantom-wall fix):
+                    // Dec_ClampRoom can "leak" -- if the two rooms share a portal
+                    // ANYWHERE along the boundary, the clamp reaches the box-side room
+                    // even when THIS specific edge sector is a wall. The box-side height
+                    // sample below then tautologically matches box.Height, so a phantom
+                    // overlap through the wall is accepted (e.g. a shallow shelf box
+                    // edge-touching a deep trench box 11 blocks below in another room).
+                    // Sample the floor as reached FROM THE TEST ROOM and require it
+                    // equals box.Height: a real edge connection has a continuous floor
+                    // (clamp traverses a true portal and lands on the box floor), while
+                    // a wall yields the test room's own floor or _noHeight -> mismatch.
+                    // Gated to WET boxes (deep OR shallow water) where the swim/amphibious
+                    // Step/Drop lets BFS exploit these. Shallow must be included: a shallow
+                    // shore box edge-touching a deep box of a room BELOW the floor slipped
+                    // through the old Water&&Water gate, and the Wet<->Wet amphibious flag
+                    // then legalized a route straight through solid floor.
+                    if ((test.Water || test.Shallow) && (box.Water || box.Shallow))
+                    {
+                        dec_splitter = false;
+                        bool seamContinuous = box.Height == Dec_GetHeight(test.Xmax, z);
+
+                        // STACKED-WATER RESCUE (mutual continuity). When the test box's
+                        // floor has collapsed through a vertical portal into a LOWER room,
+                        // test.Room IS that lower room, and sampling the box-side sector
+                        // "from the test room" reads the lower room's geometry -- which
+                        // wrongly rejects a legit swim seam (e.g. a shore ramp bordering
+                        // deep stacked water: the creature really can swim over the ramp,
+                        // and in the flip state without the stack the same seam passes
+                        // because test.Room == box.Room skips this check entirely). Probe
+                        // the opposite direction too: the TEST-side seam sector as seen
+                        // from the BOX room. In the legit stacked case the box room's
+                        // water column descends through the vertical portal onto the test
+                        // box's floor (heights match); across a solid floor/wall (phantom
+                        // seam) BOTH directions mismatch and the overlap stays rejected.
+                        if (!seamContinuous)
+                        {
+                            dec_room = boxRoom;
+                            if (Dec_ClampRoom(test.Xmax - 1, z))
+                            {
+                                dec_splitter = false;
+                                seamContinuous = test.Height == Dec_GetHeight(test.Xmax - 1, z);
+                            }
+                        }
+
+                        if (!seamContinuous)
+                            return false;
+                    }
+                }
+
+                // FIX: Re-resolve which room actually owns the box-side sector before
+                // sampling its floor height.
+                dec_room = boxRoom;
+                if (!Dec_ClampRoom(test.Xmax, z))
                     return false;
 
                 dec_splitter = false;
@@ -1638,11 +1960,51 @@ namespace TombLib.LevelData.Compilers.TombEngine
             int startZ = test.Zmin > box.Zmin ? test.Zmin : box.Zmin;
             int endZ = test.Zmax < box.Zmax ? test.Zmax : box.Zmax;
 
+            Room testRoom = Dec_ResolveRoomForFlipPass(test.Room);
+            Room boxRoom  = Dec_ResolveRoomForFlipPass(box.Room);
+
             for (int z = startZ; z < endZ; z++)
             {
-                dec_room = test.Room;
+                dec_room = testRoom;
 
-                if (!Dec_ClampRoom(test.Xmin, z)) 
+                if (!Dec_ClampRoom(test.Xmin, z))
+                    return false;
+
+                // PORTAL-CONNECTIVITY CHECK: see Dec_TestOverlapXmax.
+                if (test.Room != box.Room)
+                {
+                    dec_room = testRoom;
+                    if (!Dec_ClampRoom(test.Xmin - 1, z))
+                        return false;
+
+                    // FLOOR-CONTINUITY CHECK (water phantom-wall fix) with the
+                    // STACKED-WATER RESCUE (mutual continuity): see Dec_TestOverlapXmax.
+                    if ((test.Water || test.Shallow) && (box.Water || box.Shallow))
+                    {
+                        dec_splitter = false;
+                        bool seamContinuous = box.Height == Dec_GetHeight(test.Xmin - 1, z);
+
+                        if (!seamContinuous)
+                        {
+                            dec_room = boxRoom;
+                            if (Dec_ClampRoom(test.Xmin, z))
+                            {
+                                dec_splitter = false;
+                                seamContinuous = test.Height == Dec_GetHeight(test.Xmin, z);
+                            }
+                        }
+
+                        if (!seamContinuous)
+                            return false;
+                    }
+                }
+
+                // FIX: see Dec_TestOverlapXmax. Resolve the box-side room for the
+                // sector that lies one step past test.Xmin in the -X direction so
+                // the height sample reads from the actual neighbouring room rather
+                // than out-of-bounds in test.Room.
+                dec_room = boxRoom;
+                if (!Dec_ClampRoom(test.Xmin - 1, z))
                     return false;
 
                 dec_splitter = false;
@@ -1663,11 +2025,51 @@ namespace TombLib.LevelData.Compilers.TombEngine
             int startX = test.Xmin > box.Xmin ? test.Xmin : box.Xmin;
             int endX = test.Xmax < box.Xmax ? test.Xmax : box.Xmax;
 
+            Room testRoom = Dec_ResolveRoomForFlipPass(test.Room);
+            Room boxRoom  = Dec_ResolveRoomForFlipPass(box.Room);
+
             for (int x = startX; x < endX; x++)
             {
-                dec_room = test.Room;
+                dec_room = testRoom;
 
                 if (!Dec_ClampRoom(x, test.Zmax - 1))
+                    return false;
+
+                // PORTAL-CONNECTIVITY CHECK: see Dec_TestOverlapXmax.
+                if (test.Room != box.Room)
+                {
+                    dec_room = testRoom;
+                    if (!Dec_ClampRoom(x, test.Zmax))
+                        return false;
+
+                    // FLOOR-CONTINUITY CHECK (water phantom-wall fix) with the
+                    // STACKED-WATER RESCUE (mutual continuity): see Dec_TestOverlapXmax.
+                    if ((test.Water || test.Shallow) && (box.Water || box.Shallow))
+                    {
+                        dec_splitter = false;
+                        bool seamContinuous = box.Height == Dec_GetHeight(x, test.Zmax);
+
+                        if (!seamContinuous)
+                        {
+                            dec_room = boxRoom;
+                            if (Dec_ClampRoom(x, test.Zmax - 1))
+                            {
+                                dec_splitter = false;
+                                seamContinuous = test.Height == Dec_GetHeight(x, test.Zmax - 1);
+                            }
+                        }
+
+                        if (!seamContinuous)
+                            return false;
+                    }
+                }
+
+                // FIX: see Dec_TestOverlapXmax. Resolve the box-side room for the
+                // sector at (x, test.Zmax) -- otherwise cross-room edge adjacency
+                // is silently rejected (Dec_GetHeight reads out-of-bounds in
+                // test.Room and returns _noHeight).
+                dec_room = boxRoom;
+                if (!Dec_ClampRoom(x, test.Zmax))
                     return false;
 
                 dec_splitter = false;
@@ -1688,11 +2090,50 @@ namespace TombLib.LevelData.Compilers.TombEngine
             int startX = test.Xmin > box.Xmin ? test.Xmin : box.Xmin;
             int endX = test.Xmax < box.Xmax ? test.Xmax : box.Xmax;
 
+            Room testRoom = Dec_ResolveRoomForFlipPass(test.Room);
+            Room boxRoom  = Dec_ResolveRoomForFlipPass(box.Room);
+
             for (int x = startX; x < endX; x++)
             {
-                dec_room = test.Room;
+                dec_room = testRoom;
 
                 if (!Dec_ClampRoom(x, test.Zmin))
+                    return false;
+
+                // PORTAL-CONNECTIVITY CHECK: see Dec_TestOverlapXmax.
+                if (test.Room != box.Room)
+                {
+                    dec_room = testRoom;
+                    if (!Dec_ClampRoom(x, test.Zmin - 1))
+                        return false;
+
+                    // FLOOR-CONTINUITY CHECK (water phantom-wall fix) with the
+                    // STACKED-WATER RESCUE (mutual continuity): see Dec_TestOverlapXmax.
+                    if ((test.Water || test.Shallow) && (box.Water || box.Shallow))
+                    {
+                        dec_splitter = false;
+                        bool seamContinuous = box.Height == Dec_GetHeight(x, test.Zmin - 1);
+
+                        if (!seamContinuous)
+                        {
+                            dec_room = boxRoom;
+                            if (Dec_ClampRoom(x, test.Zmin))
+                            {
+                                dec_splitter = false;
+                                seamContinuous = test.Height == Dec_GetHeight(x, test.Zmin);
+                            }
+                        }
+
+                        if (!seamContinuous)
+                            return false;
+                    }
+                }
+
+                // FIX: see Dec_TestOverlapXmax. Resolve the box-side room for the
+                // sector at (x, test.Zmin - 1) before sampling its floor height,
+                // otherwise cross-room edge adjacency is silently rejected.
+                dec_room = boxRoom;
+                if (!Dec_ClampRoom(x, test.Zmin - 1))
                     return false;
 
                 dec_splitter = false;
@@ -1734,6 +2175,12 @@ namespace TombLib.LevelData.Compilers.TombEngine
         {
             dec_jump = false;
             dec_monkey = false;
+
+            if (Dec_TestMonkeySwingOverlap(a, b))
+            {
+                dec_monkey = true;
+                return true;
+            }
 
             // Always process from higher to lower box (numerically higher Height value)
             dec_TombEngine_box_aux box1 = a;

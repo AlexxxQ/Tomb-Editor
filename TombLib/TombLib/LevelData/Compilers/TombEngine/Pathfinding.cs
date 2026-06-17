@@ -288,13 +288,28 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     bool canTraverseAmphibious = (_overlaps[overlapIndex].Flags & OverlapFlags.AmphibiousTraversable) != 0;
 
                     var boxIndex = _overlaps[overlapIndex].Box;
+                    var overlapFlagsRaw = _overlaps[overlapIndex].Flags;
 
                     // =======================================================================
                     // FILTER 1: Flip state compatibility
                     // =======================================================================
-                    // Box must exist in the current flip state to be reachable
+                    // Box must exist in the current flip state to be reachable.
                     bool sameFlip = (!flipped && dec_boxes[boxIndex].Unflipped || flipped && dec_boxes[boxIndex].Flipped);
                     if (!sameFlip)
+                        continue;
+
+                    // =======================================================================
+                    // FILTER 1b: Overlap entry validity for current flip state
+                    // =======================================================================
+                    // Each overlap entry is tagged UnflippedValid / FlippedValid by the
+                    // two compiler passes. An entry that is valid only in the opposite
+                    // flip state must NOT be used here -- otherwise the flood-fill would
+                    // treat boxes as connected when alt geometry actually walls them off
+                    // (or vice versa), producing matching zone numbers that mislead the
+                    // runtime BFS into routing through impassable terrain.
+                    int validBit = flipped ? OverlapFlags.FlippedValid : OverlapFlags.UnflippedValid;
+                    int validMask = OverlapFlags.UnflippedValid | OverlapFlags.FlippedValid;
+                    if ((overlapFlagsRaw & validMask) != 0 && (overlapFlagsRaw & validBit) == 0)
                         continue;
 
                     // Get target box properties
@@ -356,10 +371,27 @@ namespace TombLib.LevelData.Compilers.TombEngine
                             break;
 
                         case ZoneType.Amphibious:
-                            // Amphibious: 1 click step and non-slope on land, no limit in water
-                            // Can transition between water and land boxes
-                            add = canTraverseAmphibious || (isWater && (water == isWater)) ||
-                                  (!(dec_boxes[boxIndex].Slope && !dec_boxes[boxIndex].Water) && step <= Clicks.ToWorld(1));
+                            // Mirror the runtime amphibious gate: CanExpandToBox only lets an
+                            // amphibious creature take overlaps carrying AmphibiousTraversable,
+                            // which (after the seam floor-continuity fix) encodes wet<->wet
+                            // edges with a physically continuous seam plus land edges with a
+                            // step <= 1 click. The old expression had two bugs:
+                            //   (a) `isWater` is the flood SEED box, not the box currently
+                            //       being expanded (`next`) -- a water-seeded flood blessed any
+                            //       edge into any water box level-wide, while a land-seeded
+                            //       flood denied legal deep-water moves; zone composition thus
+                            //       depended on seeding order.
+                            //   (b) it accepted jump-only overlaps (via the amphibious flag on
+                            //       wet<->wet pairs), although the runtime rejects them for
+                            //       non-jumping creatures.
+                            // Both made zones claim reachability the runtime BFS could never
+                            // satisfy, so the mood logic kept attacking unreachable targets
+                            // (e.g. crocodile circling under an enemy standing past a tall
+                            // partition that shares the inflated zone).
+                            // Keep the dry-slope exclusion: zones are the only slope filter
+                            // for the amphibious land legs (the runtime has no slope data).
+                            add = canTraverseAmphibious && !canJump &&
+                                  !(dec_boxes[boxIndex].Slope && !dec_boxes[boxIndex].Water);
                             break;
 
                         case ZoneType.Human:
