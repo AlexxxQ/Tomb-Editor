@@ -100,6 +100,22 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
         public class OverlapFlags
         {
+            // FLIP-STATE VALIDITY (runtime filter).
+            //
+            // The compiler runs two overlap passes (Pass 1 = unflipped geometry,
+            // Pass 2 = flipped geometry). For pairs whose adjacency check yields
+            // the same result in both passes, only ONE physical overlap entry is
+            // emitted but it gets BOTH flags. For pairs where alt geometry adds
+            // or removes a wall (= overlap valid in one state only), the entry
+            // carries only the matching flag.
+            //
+            // Runtime BFS (CanExpandToBox) reads FlipStatus and rejects entries
+            // missing the matching validity flag. Prevents the classic flipmap
+            // bug: a Pass 1 base-geometry overlap incorrectly used in alt state
+            // routes BFS through a wall that exists only in alt.
+            public const int UnflippedValid = 0x0001;
+            public const int FlippedValid   = 0x0002;
+
             public const int Jump = 0x0800;
             public const int Monkey = 0x2000;
             public const int AmphibiousTraversable = 0x4000;
@@ -346,6 +362,70 @@ namespace TombLib.LevelData.Compilers.TombEngine
             }
 
             // ===================================================================================
+            // PRE-PROCESS: Merge flip-state flags between flip-pair partner boxes
+            // ===================================================================================
+            // When a Pass 0 (base) box and a Pass 1 (alt) box geometrically overlap (2D bbox
+            // intersection) AND share the same floor height, they represent the same physical
+            // floor area in different flip states -- one is the base version, the other the
+            // alternate. In every flip state at runtime the underlying sectors point to one or
+            // the other of these boxes, so they must logically belong to the same flip-state
+            // zone cluster.
+            //
+            // Without this merge, a base-only box (Unflipped=true, Flipped=false) that shares
+            // area with an alt-only box becomes zone-isolated in the flipped pass. Creatures
+            // that pass between the base box (via a non-alternated neighbour room) and the alt
+            // box (in the active flipped room) trigger ZONE_MISMATCH and get pushed back. This
+            // is the "yeti vault" symptom: vault triggers, creature climbs up onto a sector
+            // whose box is the base-only floor box, runtime sees its zone differs from the
+            // creature's stored box in cluster 1, pushes it back.
+            //
+            // O(N^2) but N is hundreds at most -- negligible relative to overall compile time.
+            for (int a = 0; a < dec_boxes.Count; a++)
+            {
+                var boxA = dec_boxes[a];
+                // Skip boxes that already carry both flags -- nothing to learn from a partner.
+                if (boxA.Unflipped && boxA.Flipped)
+                    continue;
+
+                for (int b = 0; b < dec_boxes.Count; b++)
+                {
+                    if (a == b)
+                        continue;
+
+                    var boxB = dec_boxes[b];
+
+                    // Must be same floor height -- different heights mean different physical
+                    // floors (e.g. a stair box at one click up does NOT pair with the surface
+                    // it sits on).
+                    if (boxA.Height != boxB.Height)
+                        continue;
+
+                    // STRICT: bounds must be IDENTICAL, not just overlapping. Two boxes
+                    // representing the same physical area in different flip states will
+                    // have the same bbox -- if one box's bounds are a strict subset of the
+                    // other's, they cover DIFFERENT physical extents and are NOT flip
+                    // partners. Example bug they previously caused: in alt geometry a 5x1
+                    // sector strip becomes a staircase (1-sector boxes at varying heights);
+                    // the base 5-sector box (Unflipped only) would falsely get Flipped=true
+                    // from a 1-sector alt box at one end that happened to share a sector
+                    // and matched its height. BFS in alt then routed creatures THROUGH the
+                    // base box's physical extent, into the alt-only blocks.
+                    if (boxA.Xmin != boxB.Xmin || boxA.Xmax != boxB.Xmax)
+                        continue;
+                    if (boxA.Zmin != boxB.Zmin || boxA.Zmax != boxB.Zmax)
+                        continue;
+
+                    // True flip-pair partners (identical bounds + height). Merge flags.
+                    dec_boxes[a].Unflipped |= boxB.Unflipped;
+                    dec_boxes[a].Flipped   |= boxB.Flipped;
+
+                    // Early-out if A is now fully flagged.
+                    if (dec_boxes[a].Unflipped && dec_boxes[a].Flipped)
+                        break;
+                }
+            }
+
+            // ===================================================================================
             // MAIN LOOP: Check all box pairs for overlaps
             // ===================================================================================
             do
@@ -354,6 +434,11 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 dec_boxes[i].OverlapIndex = -1;  // Reset overlap index
 
                 int numOverlapsAdded = 0;
+
+                // Track Pass 1 entries by target box so Pass 2 can merge into the
+                // existing entry (set FlippedValid) instead of adding a duplicate.
+                // Key = j (target box index), Value = index into dec_overlaps.
+                var pass1Index = new Dictionary<int, int>();
 
                 // ===============================================================================
                 // PASS 1: Check overlaps in UNFLIPPED state
@@ -381,10 +466,11 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                     if (dec_boxes[i].OverlapIndex == -1)
                                         dec_boxes[i].OverlapIndex = dec_overlaps.Count;
 
-                                    // Create overlap entry
+                                    // Create overlap entry tagged as valid in UNFLIPPED state.
                                     var overlap = new TombEngineOverlap
                                     {
-                                        Box = j
+                                        Box = j,
+                                        Flags = OverlapFlags.UnflippedValid
                                     };
 
                                     // Set capability flags based on Dec_CheckOverlap results
@@ -402,6 +488,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                     if (bothWater || heightDiff <= Clicks.ToWorld(1))
                                         overlap.Flags |= OverlapFlags.AmphibiousTraversable;
 
+                                    pass1Index[j] = dec_overlaps.Count;
                                     dec_overlaps.Add(overlap);
                                     numOverlapsAdded++;
                                 }
@@ -433,18 +520,34 @@ namespace TombLib.LevelData.Compilers.TombEngine
                             // Only check if box2 also exists in flipped state
                             if (box2.Flipped)
                             {
-                                // Skip if already checked in unflipped pass
-                                // (both boxes have Unflipped flag = already processed)
-                                if (!(box1.Unflipped && box2.Unflipped))
+                                // Always run Pass 2 for box1.Flipped. The previous code skipped
+                                // the pair when both boxes carried the Unflipped flag, assuming
+                                // Pass 1 had already established the same overlap. That is FALSE
+                                // for pairs whose adjacency check straddles a portal into an
+                                // alternated room: Pass 1 traverses base geometry, Pass 2 alt
+                                // geometry, and an alt wall can make Pass 2 reject what Pass 1
+                                // accepted. The skip left the stale base overlap in the chain so
+                                // BFS routed through alt walls. If Pass 1 already added the pair,
+                                // OR in FlippedValid on that entry; otherwise emit a new entry
+                                // tagged FlippedValid only.
+                                if (Dec_CheckOverlap(box1, box2))
                                 {
-                                    if (Dec_CheckOverlap(box1, box2))
+                                    if (pass1Index.TryGetValue(j, out int existingIdx))
+                                    {
+                                        // Pair already added by Pass 1; merge flip flag.
+                                        var existing = dec_overlaps[existingIdx];
+                                        existing.Flags |= OverlapFlags.FlippedValid;
+                                        dec_overlaps[existingIdx] = existing;
+                                    }
+                                    else
                                     {
                                         if (dec_boxes[i].OverlapIndex == -1)
                                             dec_boxes[i].OverlapIndex = dec_overlaps.Count;
 
                                         var overlap = new TombEngineOverlap
                                         {
-                                            Box = j
+                                            Box = j,
+                                            Flags = OverlapFlags.FlippedValid
                                         };
 
                                         if (dec_jump)
@@ -684,8 +787,25 @@ namespace TombLib.LevelData.Compilers.TombEngine
             box.Room = dec_room;
             box.Water = dec_room.Properties.Type == RoomType.Water;
 
-            // Set flip state flags
-            if (dec_flipped)
+            // Set flip state flags.
+            //
+            // If the room is NOT part of a flip pair, the box logically exists in both
+            // flip states (the room's geometry never changes). Mark BOTH flags so the box
+            // is picked up as an overlap candidate in both Pass 1 (Unflipped) and Pass 2
+            // (Flipped) of Dec_BuildOverlaps, and likewise considered by zone generation in
+            // both passes. This is critical for cross-portal connectivity between a
+            // non-alternated room (e.g. a lower stack room) and the alternate of an
+            // adjacent alternated room (e.g. the flipped upper stack room with a
+            // repositioned ladder/stairs). Without this, a box in the non-alternated
+            // room would only carry Unflipped=true and Pass 2 would never pair it with
+            // boxes from the alternate room, producing the "creature bumps into the
+            // vertical portal after flipmap" symptom.
+            if (!dec_room.Alternated)
+            {
+                box.Unflipped = true;
+                box.Flipped = true;
+            }
+            else if (dec_flipped)
             {
                 box.Flipped = true;
             }
@@ -1078,8 +1198,15 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 if (sector.WallPortal == null)
                     break;
 
-                // Follow wall portal to adjoining room
+                // Follow wall portal to adjoining room. When processing the flipped pass
+                // and the adjoining room is itself alternated, descend into its alternate
+                // so geometry sampled across the portal matches the flip state we're
+                // currently building. Without this, the alt pass silently reads base-room
+                // sectors across wall portals, producing wrong heights and overlaps tagged
+                // 'both' at the junction between flip-changed and unchanged geometry.
                 Room adjoiningRoom = sector.WallPortal.AdjoiningRoom;
+                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
+                    adjoiningRoom = adjoiningRoom.AlternateRoom;
 
                 dec_room = adjoiningRoom;
                 room = adjoiningRoom;
@@ -1108,6 +1235,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
             while (room.GetFloorRoomConnectionInfo(new VectorInt2(localX, localZ), true).TraversableType == Room.RoomConnectionType.FullPortal)
             {
                 Room adjoiningRoom = sector.FloorPortal.AdjoiningRoom;
+                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
+                    adjoiningRoom = adjoiningRoom.AlternateRoom;
 
                 // Stop at water boundary (don't cross water/land transition via floor portals)
                 if (room.Properties.Type == RoomType.Water != (adjoiningRoom.Properties.Type == RoomType.Water))
@@ -1223,6 +1352,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
             if (sector.WallPortal is not null && sector.WallPortal.Opacity != PortalOpacity.SolidFaces)
             {
                 adjoiningRoom = sector.WallPortal.AdjoiningRoom;
+                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
+                    adjoiningRoom = adjoiningRoom.AlternateRoom;
                 dec_room = adjoiningRoom;
                 dec_doorCheck = true;
 
@@ -1240,6 +1371,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
             while (sector.FloorPortal != null && connInfo.TraversableType != Room.RoomConnectionType.NoPortal)
             {
                 adjoiningRoom = sector.FloorPortal.AdjoiningRoom;
+                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
+                    adjoiningRoom = adjoiningRoom.AlternateRoom;
 
                 if (sector.FloorPortal.Opacity == PortalOpacity.SolidFaces)
                 {
@@ -1385,7 +1518,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (zMax == zMin - 1)
             {
-                dec_room = box.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1403,7 +1536,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (zMax == zMin - 2)
             {
-                dec_room = box.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1433,7 +1566,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (zMax == zMin - 1)
             {
-                dec_room = box.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1451,7 +1584,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (zMax == zMin - 2)
             {
-                dec_room = box.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1507,7 +1640,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (xMax == xMin - 1)
             {
-                dec_room = b.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1525,7 +1658,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (xMax == xMin - 2)
             {
-                dec_room = b.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1554,7 +1687,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (xMax == xMin - 1)
             {
-                dec_room = b.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1572,7 +1705,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (xMax == xMin - 2)
             {
-                dec_room = b.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1607,6 +1740,21 @@ namespace TombLib.LevelData.Compilers.TombEngine
         ///
         /// Tests all sectors along the shared edge to ensure they connect properly.
         /// </summary>
+        // Resolves a box.Room reference to the alternate version when we're in the flipped
+        // pass. Dec_AddBox merges duplicate boxes and keeps the Room field from whichever
+        // pass first added the box (typically Pass 0 = base). Without this re-resolution,
+        // Pass 2 geometry sampling via dec_room = box.Room reads BASE heights even when
+        // checking alt-pass adjacency, letting Pass 2 accept overlaps that alt geometry
+        // actually walls off (the "BFS routes through alt block" / "can't climb flipped
+        // stairs" bug).
+        [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+        private Room Dec_ResolveRoomForFlipPass(Room r)
+        {
+            if (dec_flipped && r != null && r.AlternateRoom != null)
+                return r.AlternateRoom;
+            return r;
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public bool Dec_TestOverlapXmax(dec_TombEngine_box_aux test, dec_TombEngine_box_aux box)
         {
@@ -1615,7 +1763,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             for (int z = startZ; z < endZ; z++)
             {
-                dec_room = test.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(test.Room);
 
                 if (!Dec_ClampRoom(test.Xmax - 1, z))
                     return false;
@@ -1640,7 +1788,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             for (int z = startZ; z < endZ; z++)
             {
-                dec_room = test.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(test.Room);
 
                 if (!Dec_ClampRoom(test.Xmin, z)) 
                     return false;
@@ -1665,7 +1813,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             for (int x = startX; x < endX; x++)
             {
-                dec_room = test.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(test.Room);
 
                 if (!Dec_ClampRoom(x, test.Zmax - 1))
                     return false;
@@ -1690,7 +1838,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             for (int x = startX; x < endX; x++)
             {
-                dec_room = test.Room;
+                dec_room = Dec_ResolveRoomForFlipPass(test.Room);
 
                 if (!Dec_ClampRoom(x, test.Zmin))
                     return false;
