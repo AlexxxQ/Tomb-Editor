@@ -100,19 +100,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
         public class OverlapFlags
         {
-            // FLIP-STATE VALIDITY (runtime filter).
-            //
-            // The compiler runs two overlap passes (Pass 1 = unflipped geometry,
-            // Pass 2 = flipped geometry). For pairs whose adjacency check yields
-            // the same result in both passes, only ONE physical overlap entry is
-            // emitted but it gets BOTH flags. For pairs where alt geometry adds
-            // or removes a wall (= overlap valid in one state only), the entry
-            // carries only the matching flag.
-            //
-            // Runtime BFS (CanExpandToBox) reads FlipStatus and rejects entries
-            // missing the matching validity flag. Prevents the classic flipmap
-            // bug: a Pass 1 base-geometry overlap incorrectly used in alt state
-            // routes BFS through a wall that exists only in alt.
+            // OVERLAP FLIP-STATE VALIDITY (runtime filter).
             public const int UnflippedValid = 0x0001;
             public const int FlippedValid   = 0x0002;
 
