@@ -352,26 +352,11 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // ===================================================================================
             // PRE-PROCESS: Merge flip-state flags between flip-pair partner boxes
             // ===================================================================================
-            // When a Pass 0 (base) box and a Pass 1 (alt) box geometrically overlap (2D bbox
-            // intersection) AND share the same floor height, they represent the same physical
-            // floor area in different flip states -- one is the base version, the other the
-            // alternate. In every flip state at runtime the underlying sectors point to one or
-            // the other of these boxes, so they must logically belong to the same flip-state
-            // zone cluster.
-            //
-            // Without this merge, a base-only box (Unflipped=true, Flipped=false) that shares
-            // area with an alt-only box becomes zone-isolated in the flipped pass. Creatures
-            // that pass between the base box (via a non-alternated neighbour room) and the alt
-            // box (in the active flipped room) trigger ZONE_MISMATCH and get pushed back. This
-            // is the "yeti vault" symptom: vault triggers, creature climbs up onto a sector
-            // whose box is the base-only floor box, runtime sees its zone differs from the
-            // creature's stored box in cluster 1, pushes it back.
-            //
-            // O(N^2) but N is hundreds at most -- negligible relative to overall compile time.
+            // The function finds the base and alternate boxes of the same sector (exactly matching bounds + height) 
+            // and sets both `Unflipped|Flipped` flags on each, so that both boxes are valid in both flip states.
             for (int a = 0; a < dec_boxes.Count; a++)
             {
                 var boxA = dec_boxes[a];
-                // Skip boxes that already carry both flags -- nothing to learn from a partner.
                 if (boxA.Unflipped && boxA.Flipped)
                     continue;
 
@@ -382,22 +367,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
                     var boxB = dec_boxes[b];
 
-                    // Must be same floor height -- different heights mean different physical
-                    // floors (e.g. a stair box at one click up does NOT pair with the surface
-                    // it sits on).
                     if (boxA.Height != boxB.Height)
                         continue;
-
-                    // STRICT: bounds must be IDENTICAL, not just overlapping. Two boxes
-                    // representing the same physical area in different flip states will
-                    // have the same bbox -- if one box's bounds are a strict subset of the
-                    // other's, they cover DIFFERENT physical extents and are NOT flip
-                    // partners. Example bug they previously caused: in alt geometry a 5x1
-                    // sector strip becomes a staircase (1-sector boxes at varying heights);
-                    // the base 5-sector box (Unflipped only) would falsely get Flipped=true
-                    // from a 1-sector alt box at one end that happened to share a sector
-                    // and matched its height. BFS in alt then routed creatures THROUGH the
-                    // base box's physical extent, into the alt-only blocks.
                     if (boxA.Xmin != boxB.Xmin || boxA.Xmax != boxB.Xmax)
                         continue;
                     if (boxA.Zmin != boxB.Zmin || boxA.Zmax != boxB.Zmax)
@@ -407,7 +378,6 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     dec_boxes[a].Unflipped |= boxB.Unflipped;
                     dec_boxes[a].Flipped   |= boxB.Flipped;
 
-                    // Early-out if A is now fully flagged.
                     if (dec_boxes[a].Unflipped && dec_boxes[a].Flipped)
                         break;
                 }
