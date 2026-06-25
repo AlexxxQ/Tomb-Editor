@@ -1518,7 +1518,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (zMax == zMin - 1)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
+                dec_room = Dec_GetRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1536,7 +1536,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (zMax == zMin - 2)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
+                dec_room = Dec_GetRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1566,7 +1566,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (zMax == zMin - 1)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
+                dec_room = Dec_GetRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1584,7 +1584,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (zMax == zMin - 2)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(box.Room);
+                dec_room = Dec_GetRoomForFlipPass(box.Room);
 
                 if (!Dec_ClampRoom(currentX, zMax - 1))
                     return false;
@@ -1640,7 +1640,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (xMax == xMin - 1)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
+                dec_room = Dec_GetRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1658,7 +1658,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (xMax == xMin - 2)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
+                dec_room = Dec_GetRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1687,7 +1687,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 1 sector jump
             if (xMax == xMin - 1)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
+                dec_room = Dec_GetRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1705,7 +1705,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // 2 sectors jump
             if (xMax == xMin - 2)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(b.Room);
+                dec_room = Dec_GetRoomForFlipPass(b.Room);
 
                 if (!Dec_ClampRoom(xMax - 1, currentZ))
                     return false;
@@ -1740,15 +1740,15 @@ namespace TombLib.LevelData.Compilers.TombEngine
         ///
         /// Tests all sectors along the shared edge to ensure they connect properly.
         /// </summary>
-        // Resolves a box.Room reference to the alternate version when we're in the flipped
-        // pass. Dec_AddBox merges duplicate boxes and keeps the Room field from whichever
-        // pass first added the box (typically Pass 0 = base). Without this re-resolution,
+        // Returns the alternate version of a room when we're in the flipped pass, otherwise
+        // the room as-is. Dec_AddBox merges duplicate boxes and keeps the Room field from
+        // whichever pass first added the box (typically Pass 0 = base). Without this,
         // Pass 2 geometry sampling via dec_room = box.Room reads BASE heights even when
         // checking alt-pass adjacency, letting Pass 2 accept overlaps that alt geometry
         // actually walls off (the "BFS routes through alt block" / "can't climb flipped
         // stairs" bug).
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        private Room Dec_ResolveRoomForFlipPass(Room r)
+        private Room Dec_GetRoomForFlipPass(Room r)
         {
             if (dec_flipped && r != null && r.AlternateRoom != null)
                 return r.AlternateRoom;
@@ -1763,7 +1763,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             for (int z = startZ; z < endZ; z++)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(test.Room);
+                dec_room = Dec_GetRoomForFlipPass(test.Room);
 
                 if (!Dec_ClampRoom(test.Xmax - 1, z))
                     return false;
@@ -1788,7 +1788,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             for (int z = startZ; z < endZ; z++)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(test.Room);
+                dec_room = Dec_GetRoomForFlipPass(test.Room);
 
                 if (!Dec_ClampRoom(test.Xmin, z)) 
                     return false;
@@ -1813,7 +1813,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             for (int x = startX; x < endX; x++)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(test.Room);
+                dec_room = Dec_GetRoomForFlipPass(test.Room);
 
                 if (!Dec_ClampRoom(x, test.Zmax - 1))
                     return false;
@@ -1838,7 +1838,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             for (int x = startX; x < endX; x++)
             {
-                dec_room = Dec_ResolveRoomForFlipPass(test.Room);
+                dec_room = Dec_GetRoomForFlipPass(test.Room);
 
                 if (!Dec_ClampRoom(x, test.Zmin))
                     return false;
