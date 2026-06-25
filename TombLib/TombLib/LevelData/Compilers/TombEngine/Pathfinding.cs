@@ -293,7 +293,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     // =======================================================================
                     // FILTER 1: Flip state compatibility
                     // =======================================================================
-                    // Box must exist in the current flip state to be reachable.
+                    // Box must exist in the current flip state to be reachable
                     bool sameFlip = (!flipped && dec_boxes[boxIndex].Unflipped || flipped && dec_boxes[boxIndex].Flipped);
                     if (!sameFlip)
                         continue;
@@ -301,12 +301,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     // =======================================================================
                     // FILTER 1b: Overlap entry validity for current flip state
                     // =======================================================================
-                    // Each overlap entry is tagged UnflippedValid / FlippedValid by the
-                    // two compiler passes. An entry that is valid only in the opposite
-                    // flip state must NOT be used here -- otherwise the flood-fill would
-                    // treat boxes as connected when alt geometry actually walls them off
-                    // (or vice versa), producing matching zone numbers that mislead the
-                    // runtime BFS into routing through impassable terrain.
+                    // Checks the validity bits and filter only overlaps that match the current flip state.
                     int validBit = flipped ? OverlapFlags.FlippedValid : OverlapFlags.UnflippedValid;
                     int validMask = OverlapFlags.UnflippedValid | OverlapFlags.FlippedValid;
                     if ((overlapFlagsRaw & validMask) != 0 && (overlapFlagsRaw & validBit) == 0)
