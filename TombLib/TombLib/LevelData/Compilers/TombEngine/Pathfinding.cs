@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using TombLib.LevelData;
 
 namespace TombLib.LevelData.Compilers.TombEngine
 {
@@ -146,6 +147,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // Convert internal box format to TombEngine format
             _boxes = new List<TombEngineBox>();
             _zones = new List<TombEngineZoneGroup>();
+            int[] boxFlipMetadata = BuildCompiledBoxFlipMetadata();
 
             for (var i = 0; i < dec_boxes.Count; i++)
             {
@@ -159,6 +161,11 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
                 if (dec_boxes[i].Shallow)
                     flags |= BoxFlags.Shallow;
+
+                if (dec_boxes[i].Slope)
+                    flags |= BoxFlags.Slope;
+
+                flags |= boxFlipMetadata[i];
 
                 var box = new TombEngineBox()
                 {
@@ -227,6 +234,74 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             ReportProgress(52, "    Number of boxes/zones: " + _boxes.Count);
             ReportProgress(52, "    Number of overlaps: " + _overlaps.Count);
+        }
+
+        private int[] BuildCompiledBoxFlipMetadata()
+        {
+            int boxCount = dec_boxes.Count;
+            int[] metadata = new int[boxCount];
+            byte[,] stateMasks = new byte[boxCount, BoxFlags.MaxFlipGroups];
+
+            void MarkBoxState(int box, int group, byte stateBit)
+            {
+                if (box >= 0 &&
+                    box < boxCount &&
+                    group >= 0 &&
+                    group < BoxFlags.MaxFlipGroups)
+                    stateMasks[box, group] |= stateBit;
+            }
+
+            foreach (Room room in _level.Rooms)
+            {
+                if (room == null ||
+                    room.AlternateRoom == null ||
+                    room.AlternateGroup < 0 ||
+                    room.AlternateGroup >= BoxFlags.MaxFlipGroups)
+                    continue;
+
+                if (_tempRooms.TryGetValue(room, out TombEngineRoom baseRoom))
+                {
+                    foreach (var sector in baseRoom.Sectors)
+                        MarkBoxState(sector.BoxIndex, room.AlternateGroup, 1);
+                }
+
+                if (_tempRooms.TryGetValue(room.AlternateRoom, out TombEngineRoom altRoom))
+                {
+                    foreach (var sector in altRoom.Sectors)
+                        MarkBoxState(sector.BoxIndex, room.AlternateGroup, 2);
+                }
+            }
+
+            for (int box = 0; box < boxCount; box++)
+            {
+                int native = 2;
+                int group = -1;
+                int bothGroup = -1;
+
+                for (int candidateGroup = 0; candidateGroup < BoxFlags.MaxFlipGroups; candidateGroup++)
+                {
+                    byte mask = stateMasks[box, candidateGroup];
+                    if (mask == 1 || mask == 2)
+                    {
+                        native = (mask == 1) ? 0 : 1;
+                        group = candidateGroup;
+                        break;
+                    }
+
+                    if (mask == 3 && bothGroup == -1)
+                        bothGroup = candidateGroup;
+                }
+
+                if (group == -1 && bothGroup != -1)
+                    group = bothGroup;
+
+                int encodedGroup = (group >= 0) ? group + 1 : 0;
+                metadata[box] = BoxFlags.FlipMetadata |
+                    ((encodedGroup << BoxFlags.FlipGroupShift) & BoxFlags.FlipGroupMask) |
+                    ((native << BoxFlags.FlipNativeShift) & BoxFlags.FlipNativeMask);
+            }
+
+            return metadata;
         }
 
         /// <summary>

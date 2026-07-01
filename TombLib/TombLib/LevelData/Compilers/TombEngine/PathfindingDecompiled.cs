@@ -94,8 +94,18 @@ namespace TombLib.LevelData.Compilers.TombEngine
         {
             public const int Water		= 0x0200;
             public const int Shallow	= 0x0400;
+            public const int Slope		= 0x0800;  // Steep floor (gradient >= 3 clicks). Exported so the
+                                                   // engine's runtime zone re-flood can reproduce the land
+                                                   // slope filter (which is otherwise compile-time only).
             public const int Blocked	= 0x4000;
             public const int Splitter	= 0x8000;
+
+            public const int FlipGroupShift = 16;
+            public const int FlipGroupMask = 0x01FF0000; // 9 bits: stored as group + 1, 0 = no group.
+            public const int FlipNativeShift = 25;
+            public const int FlipNativeMask = 0x06000000; // 0 = base-only, 1 = alt-only, 2 = both.
+            public const int FlipMetadata = 0x08000000;
+            public const int MaxFlipGroups = 256;
         }
 
         public class OverlapFlags
@@ -681,10 +691,15 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 if (box.Water || box.Shallow)
                     dec_boxes[boxIndex].Room = box.Room;
 
-                // Duplicate found - update flags if needed
-                dec_boxes[boxIndex].Flipped |= box.Flipped;
-                dec_boxes[boxIndex].Water   |= box.Water;
-                dec_boxes[boxIndex].Shallow |= box.Shallow;
+                // Duplicate found - merge state flags from BOTH passes. Unflipped must be
+                // merged too: a box first created in the flipped pass (Flipped only) that is
+                // later re-created in the base pass has to accumulate Unflipped, otherwise it
+                // stays flip-only and the runtime treats it as non-existent in the base state,
+                // breaking connectivity at boundaries with non-alternated ('none') rooms.
+                dec_boxes[boxIndex].Unflipped |= box.Unflipped;
+                dec_boxes[boxIndex].Flipped   |= box.Flipped;
+                dec_boxes[boxIndex].Water      |= box.Water;
+                dec_boxes[boxIndex].Shallow    |= box.Shallow;
             }
 
             return boxIndex;
@@ -1764,8 +1779,26 @@ namespace TombLib.LevelData.Compilers.TombEngine
             for (int z = startZ; z < endZ; z++)
             {
                 dec_room = Dec_GetRoomForFlipPass(test.Room);
-
                 if (!Dec_ClampRoom(test.Xmax - 1, z))
+                    return false;
+
+                // Portal-connectivity guard: reject a phantom overlap when the box-side
+                // sector can't be reached from the test room through a real portal -- i.e.
+                // two rooms whose 2D rectangles merely touch with no portal between them
+                // (e.g. an alt room edge-touching a non-alternated 'none' room). Without
+                // this, BFS gets spurious connections through walls to boxes at unrelated
+                // heights, and the creature stalls trying to follow them.
+                if (test.Room != box.Room)
+                {
+                    dec_room = Dec_GetRoomForFlipPass(test.Room);
+                    if (!Dec_ClampRoom(test.Xmax, z))
+                        return false;
+                }
+
+                // Sample the box-side floor from the box's OWN room (resolved to its
+                // alternate in the flipped pass), not from the test room left over above.
+                dec_room = Dec_GetRoomForFlipPass(box.Room);
+                if (!Dec_ClampRoom(test.Xmax, z))
                     return false;
 
                 dec_splitter = false;
@@ -1789,8 +1822,21 @@ namespace TombLib.LevelData.Compilers.TombEngine
             for (int z = startZ; z < endZ; z++)
             {
                 dec_room = Dec_GetRoomForFlipPass(test.Room);
+                if (!Dec_ClampRoom(test.Xmin, z))
+                    return false;
 
-                if (!Dec_ClampRoom(test.Xmin, z)) 
+                // Portal-connectivity guard (see Xmax): reject a phantom overlap with no
+                // real portal between the touching rooms.
+                if (test.Room != box.Room)
+                {
+                    dec_room = Dec_GetRoomForFlipPass(test.Room);
+                    if (!Dec_ClampRoom(test.Xmin - 1, z))
+                        return false;
+                }
+
+                // Sample the box-side floor from the box's own resolved room (see Xmax).
+                dec_room = Dec_GetRoomForFlipPass(box.Room);
+                if (!Dec_ClampRoom(test.Xmin - 1, z))
                     return false;
 
                 dec_splitter = false;
@@ -1814,8 +1860,21 @@ namespace TombLib.LevelData.Compilers.TombEngine
             for (int x = startX; x < endX; x++)
             {
                 dec_room = Dec_GetRoomForFlipPass(test.Room);
-
                 if (!Dec_ClampRoom(x, test.Zmax - 1))
+                    return false;
+
+                // Portal-connectivity guard (see Xmax): reject a phantom overlap with no
+                // real portal between the touching rooms.
+                if (test.Room != box.Room)
+                {
+                    dec_room = Dec_GetRoomForFlipPass(test.Room);
+                    if (!Dec_ClampRoom(x, test.Zmax))
+                        return false;
+                }
+
+                // Sample the box-side floor from the box's own resolved room (see Xmax).
+                dec_room = Dec_GetRoomForFlipPass(box.Room);
+                if (!Dec_ClampRoom(x, test.Zmax))
                     return false;
 
                 dec_splitter = false;
@@ -1839,8 +1898,21 @@ namespace TombLib.LevelData.Compilers.TombEngine
             for (int x = startX; x < endX; x++)
             {
                 dec_room = Dec_GetRoomForFlipPass(test.Room);
-
                 if (!Dec_ClampRoom(x, test.Zmin))
+                    return false;
+
+                // Portal-connectivity guard (see Xmax): reject a phantom overlap with no
+                // real portal between the touching rooms.
+                if (test.Room != box.Room)
+                {
+                    dec_room = Dec_GetRoomForFlipPass(test.Room);
+                    if (!Dec_ClampRoom(x, test.Zmin - 1))
+                        return false;
+                }
+
+                // Sample the box-side floor from the box's own resolved room (see Xmax).
+                dec_room = Dec_GetRoomForFlipPass(box.Room);
+                if (!Dec_ClampRoom(x, test.Zmin - 1))
                     return false;
 
                 dec_splitter = false;
