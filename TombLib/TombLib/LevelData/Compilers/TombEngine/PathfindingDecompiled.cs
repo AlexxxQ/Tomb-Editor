@@ -125,6 +125,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // routes BFS through a wall that exists only in alt.
             public const int UnflippedValid = 0x0001;
             public const int FlippedValid   = 0x0002;
+            public const int RouteExitFloorHint = 0x0004;
 
             public const int Jump = 0x0800;
             public const int Monkey = 0x2000;
@@ -177,6 +178,17 @@ namespace TombLib.LevelData.Compilers.TombEngine
         /// Used to set the JUMP_BIT (0x0800) flag on the overlap.
         /// </summary>
         private bool dec_jump;
+
+        /// <summary>
+        /// Flag set by Dec_CheckOverlap for accepted height-changing links whose
+        /// destination floor must be resolved from the route exit box at runtime.
+        /// </summary>
+        private bool dec_routeExitFloorHint;
+
+        /// <summary>
+        /// Set while Dec_CheckOverlap samples an edge through a vertical portal.
+        /// </summary>
+        private bool dec_overlapTraversedVerticalPortal;
 
         /// <summary>
         /// Current room being processed.
@@ -425,6 +437,9 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     if (boxA.Zmin != boxB.Zmin || boxA.Zmax != boxB.Zmax)
                         continue;
 
+                    if (!Dec_CanShareBoxIdentity(boxA, boxB))
+                        continue;
+
                     // True flip-pair partners (identical bounds + height). Merge flags.
                     dec_boxes[a].Unflipped |= boxB.Unflipped;
                     dec_boxes[a].Flipped   |= boxB.Flipped;
@@ -488,6 +503,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                         overlap.Flags |= OverlapFlags.Jump;   // JUMP_BIT
                                     if (dec_monkey)
                                         overlap.Flags |= OverlapFlags.Monkey;  // MONKEY_BIT
+                                    if (dec_routeExitFloorHint)
+                                        overlap.Flags |= OverlapFlags.RouteExitFloorHint;
 
                                     // Set AmphibiousTraversable flag
                                     // Water-Water: always traversable
@@ -547,6 +564,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                         // Pair already added by Pass 1; merge flip flag.
                                         var existing = dec_overlaps[existingIdx];
                                         existing.Flags |= OverlapFlags.FlippedValid;
+                                        if (dec_routeExitFloorHint)
+                                            existing.Flags |= OverlapFlags.RouteExitFloorHint;
                                         dec_overlaps[existingIdx] = existing;
                                     }
                                     else
@@ -564,6 +583,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                             overlap.Flags |= OverlapFlags.Jump;
                                         if (dec_monkey)
                                             overlap.Flags |= OverlapFlags.Monkey;
+                                        if (dec_routeExitFloorHint)
+                                            overlap.Flags |= OverlapFlags.RouteExitFloorHint;
 
                                         // Set AmphibiousTraversable flag
                                         // Water-Water: always traversable
@@ -597,6 +618,30 @@ namespace TombLib.LevelData.Compilers.TombEngine
             dec_flipped = false;
 
             return true;
+        }
+
+        private static int Dec_GetRoomFlipGroup(Room room)
+        {
+            return room != null && room.Alternated ? room.AlternateGroup : -1;
+        }
+
+        private static bool Dec_CanShareBoxIdentity(dec_TombEngine_box_aux first, dec_TombEngine_box_aux second)
+        {
+            int firstGroup = Dec_GetRoomFlipGroup(first.Room);
+            int secondGroup = Dec_GetRoomFlipGroup(second.Room);
+
+            return firstGroup < 0 || secondGroup < 0 || firstGroup == secondGroup;
+        }
+
+        private Room Dec_GetAdjoiningRoomForFlipPass(Room currentRoom, Room adjoiningRoom)
+        {
+            if (!dec_flipped || adjoiningRoom?.AlternateRoom == null)
+                return adjoiningRoom;
+
+            if (!currentRoom.Alternated || currentRoom.AlternateGroup == adjoiningRoom.AlternateGroup)
+                return adjoiningRoom.AlternateRoom;
+
+            return adjoiningRoom;
         }
 
         /// <summary>
@@ -649,7 +694,9 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     int maskBounds = Sse2.MoveMask(cmpBounds.AsByte());
 
                     // All 4 bounds must match (0xFFFF = all 16 bytes equal)
-                    if (maskBounds == 0xFFFF && candidate.Height == box.Height)
+                    if (maskBounds == 0xFFFF &&
+                        candidate.Height == box.Height &&
+                        Dec_CanShareBoxIdentity(candidate, box))
                     {
                         boxIndex = i;
                         break;
@@ -667,7 +714,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
                         dec_boxes[i].Xmax == box.Xmax &&
                         dec_boxes[i].Zmin == box.Zmin &&
                         dec_boxes[i].Zmax == box.Zmax &&
-                        dec_boxes[i].Height == box.Height)
+                        dec_boxes[i].Height == box.Height &&
+                        Dec_CanShareBoxIdentity(dec_boxes[i], box))
                     {
                         boxIndex = i;
                         break;
@@ -1220,8 +1268,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 // sectors across wall portals, producing wrong heights and overlaps tagged
                 // 'both' at the junction between flip-changed and unchanged geometry.
                 Room adjoiningRoom = sector.WallPortal.AdjoiningRoom;
-                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
-                    adjoiningRoom = adjoiningRoom.AlternateRoom;
+                adjoiningRoom = Dec_GetAdjoiningRoomForFlipPass(room, adjoiningRoom);
 
                 dec_room = adjoiningRoom;
                 room = adjoiningRoom;
@@ -1250,13 +1297,13 @@ namespace TombLib.LevelData.Compilers.TombEngine
             while (room.GetFloorRoomConnectionInfo(new VectorInt2(localX, localZ), true).TraversableType == Room.RoomConnectionType.FullPortal)
             {
                 Room adjoiningRoom = sector.FloorPortal.AdjoiningRoom;
-                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
-                    adjoiningRoom = adjoiningRoom.AlternateRoom;
+                adjoiningRoom = Dec_GetAdjoiningRoomForFlipPass(room, adjoiningRoom);
 
                 // Stop at water boundary (don't cross water/land transition via floor portals)
                 if (room.Properties.Type == RoomType.Water != (adjoiningRoom.Properties.Type == RoomType.Water))
                     break;
 
+                dec_overlapTraversedVerticalPortal = true;
                 dec_room = adjoiningRoom;
 
                 room = dec_room;
@@ -1367,8 +1414,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             if (sector.WallPortal is not null && sector.WallPortal.Opacity != PortalOpacity.SolidFaces)
             {
                 adjoiningRoom = sector.WallPortal.AdjoiningRoom;
-                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
-                    adjoiningRoom = adjoiningRoom.AlternateRoom;
+                adjoiningRoom = Dec_GetAdjoiningRoomForFlipPass(room, adjoiningRoom);
                 dec_room = adjoiningRoom;
                 dec_doorCheck = true;
 
@@ -1386,8 +1432,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             while (sector.FloorPortal != null && connInfo.TraversableType != Room.RoomConnectionType.NoPortal)
             {
                 adjoiningRoom = sector.FloorPortal.AdjoiningRoom;
-                if (adjoiningRoom.AlternateRoom != null && dec_flipped)
-                    adjoiningRoom = adjoiningRoom.AlternateRoom;
+                adjoiningRoom = Dec_GetAdjoiningRoomForFlipPass(room, adjoiningRoom);
 
                 if (sector.FloorPortal.Opacity == PortalOpacity.SolidFaces)
                 {
@@ -1395,6 +1440,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                         break;
                 }
 
+                dec_overlapTraversedVerticalPortal = true;
                 dec_room = adjoiningRoom;
                 room = dec_room;
 
@@ -1452,8 +1498,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             if (dec_checkUnderwater && room.Properties.Type == RoomType.Water && delta <= Clicks.ToWorld(2) && sector.CeilingPortal != null)
             {
                 adjoiningRoom = sector.CeilingPortal.AdjoiningRoom;
-                if (adjoiningRoom.AlternateRoom != null && dec_flipped) 
-                    adjoiningRoom = adjoiningRoom.AlternateRoom;
+                adjoiningRoom = Dec_GetAdjoiningRoomForFlipPass(room, adjoiningRoom);
 
                 if (adjoiningRoom.Properties.Type != RoomType.Water)
                 {
@@ -1770,6 +1815,71 @@ namespace TombLib.LevelData.Compilers.TombEngine
             return r;
         }
 
+        private bool Dec_IsSameFlipRoom(Room room, Room expected)
+        {
+            if (room == expected)
+                return true;
+
+            return dec_flipped && room?.AlternateRoom == expected;
+        }
+
+        private bool Dec_BoxesShareVerticalPortal(dec_TombEngine_box_aux a, dec_TombEngine_box_aux b)
+        {
+            if (a.Room == b.Room || Math.Abs(a.Height - b.Height) > Clicks.ToWorld(4))
+                return false;
+
+            int startX = Math.Max(a.Xmin, b.Xmin);
+            int endX = Math.Min(a.Xmax, b.Xmax);
+            int startZ = Math.Max(a.Zmin, b.Zmin);
+            int endZ = Math.Min(a.Zmax, b.Zmax);
+            if (startX >= endX || startZ >= endZ)
+                return false;
+
+            var lower = a.Height > b.Height ? a : b;
+            var upper = lower == a ? b : a;
+            Room lowerRoom = Dec_GetRoomForFlipPass(lower.Room);
+            Room upperRoom = Dec_GetRoomForFlipPass(upper.Room);
+            if (lowerRoom == null || upperRoom == null)
+                return false;
+
+            for (int x = startX; x < endX; x++)
+            {
+                for (int z = startZ; z < endZ; z++)
+                {
+                    int lowerX = x - lowerRoom.Position.X;
+                    int lowerZ = z - lowerRoom.Position.Z;
+                    if (lowerX >= 0 && lowerZ >= 0 && lowerX < lowerRoom.NumXSectors && lowerZ < lowerRoom.NumZSectors)
+                    {
+                        var ceilingInfo = lowerRoom.GetCeilingRoomConnectionInfo(new VectorInt2(lowerX, lowerZ), true);
+                        if (ceilingInfo.TraversableType != Room.RoomConnectionType.NoPortal &&
+                            Dec_IsSameFlipRoom(ceilingInfo.Portal?.AdjoiningRoom, upperRoom))
+                            return true;
+                    }
+
+                    int upperX = x - upperRoom.Position.X;
+                    int upperZ = z - upperRoom.Position.Z;
+                    if (upperX >= 0 && upperZ >= 0 && upperX < upperRoom.NumXSectors && upperZ < upperRoom.NumZSectors)
+                    {
+                        var floorInfo = upperRoom.GetFloorRoomConnectionInfo(new VectorInt2(upperX, upperZ), true);
+                        if (floorInfo.TraversableType != Room.RoomConnectionType.NoPortal &&
+                            Dec_IsSameFlipRoom(floorInfo.Portal?.AdjoiningRoom, lowerRoom))
+                            return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private bool Dec_NeedsRouteExitFloorHint(dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
+        {
+            int heightDiff = Math.Abs(from.Height - to.Height);
+            if (heightDiff == 0 || heightDiff > Clicks.ToWorld(4))
+                return false;
+
+            return dec_overlapTraversedVerticalPortal || Dec_BoxesShareVerticalPortal(from, to);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         public bool Dec_TestOverlapXmax(dec_TombEngine_box_aux test, dec_TombEngine_box_aux box)
         {
@@ -1954,6 +2064,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
         {
             dec_jump = false;
             dec_monkey = false;
+            dec_routeExitFloorHint = false;
+            dec_overlapTraversedVerticalPortal = false;
 
             // Always process from higher to lower box (numerically higher Height value)
             dec_TombEngine_box_aux box1 = a;
@@ -2001,6 +2113,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 }
 
                 if (box1.Monkey && box2.Monkey) dec_monkey = true;
+                dec_routeExitFloorHint = Dec_NeedsRouteExitFloorHint(a, b);
                 return true;
             }
 
@@ -2011,7 +2124,13 @@ namespace TombLib.LevelData.Compilers.TombEngine
             {
                 // Straight overlap - must have same height
                 if (box1.Height != box2.Height)
-                    return false;
+                {
+                    if (!Dec_BoxesShareVerticalPortal(a, b))
+                        return false;
+
+                    dec_routeExitFloorHint = Dec_NeedsRouteExitFloorHint(a, b);
+                    return true;
+                }
 
                 if (box1.Monkey && box2.Monkey) dec_monkey = true;
                 return true;
@@ -2044,6 +2163,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             }
 
             if (box1.Monkey && box2.Monkey) dec_monkey = true;
+            dec_routeExitFloorHint = Dec_NeedsRouteExitFloorHint(a, b);
             return true;
         }
     }
