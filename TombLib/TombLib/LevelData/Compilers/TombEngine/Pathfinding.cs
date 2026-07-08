@@ -356,10 +356,18 @@ namespace TombLib.LevelData.Compilers.TombEngine
                             break;
 
                         case ZoneType.Amphibious:
-                            // Amphibious: 1 click step and non-slope on land, no limit in water
-                            // Can transition between water and land boxes
-                            add = canTraverseAmphibious || (isWater && (water == isWater)) ||
-                                  (!(dec_boxes[boxIndex].Slope && !dec_boxes[boxIndex].Water) && step <= Clicks.ToWorld(1));
+                            // Mirror the runtime amphibious gate: CanExpandToBox only lets an
+                            // amphibious creature take AmphibiousTraversable overlaps (wet<->wet
+                            // edges with a continuous seam + land edges with step <= 1 click).
+                            // The old expression keyed off the flood SEED box (`isWater`), so
+                            // zone composition depended on seeding order, and it accepted
+                            // jump-only overlaps the runtime rejects -- zones claimed
+                            // reachability BFS could never satisfy (crocodile circling under an
+                            // enemy past a tall partition sharing the inflated zone).
+                            // Keep the dry-slope exclusion: zones are the only slope filter for
+                            // the amphibious land legs (the runtime has no slope data).
+                            add = canTraverseAmphibious && !canJump &&
+                                  !(dec_boxes[boxIndex].Slope && !dec_boxes[boxIndex].Water);
                             break;
 
                         case ZoneType.Human:

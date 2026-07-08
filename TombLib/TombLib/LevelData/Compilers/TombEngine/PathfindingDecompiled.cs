@@ -393,13 +393,23 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                     if (dec_monkey)
                                         overlap.Flags |= OverlapFlags.Monkey;  // MONKEY_BIT
 
-                                    // Set AmphibiousTraversable flag
-                                    // Water-Water: always traversable
-                                    // Land-Land or Water-Land: traversable if height diff <= 1 click
-                                    bool bothWater = (box1.Water && box2.Water) || (box1.Shallow && box2.Shallow);
+                                    // Set AmphibiousTraversable flag.
+                                    // Wet<->Wet (deep OR shallow on either side): always traversable --
+                                    // the creature swims/wades over the underwater floor step. The old
+                                    // "both Water OR both Shallow" gate trapped crocodiles in deep pools
+                                    // next to shallow exit ramps.
+                                    // Dry<->Dry: floor step <= 1 click (normal land walking).
+                                    // Wet<->Dry (waterline climb-out): STRICTLY below 1 click -- a flat
+                                    // shelf a full click under the shore is not climbable from water;
+                                    // only an inclined shallow sector (averaged box height ~half click)
+                                    // passes, so zones no longer merge across unusable exits.
+                                    bool box1Wet = box1.Water || box1.Shallow;
+                                    bool box2Wet = box2.Water || box2.Shallow;
                                     int heightDiff = Math.Abs(box1.Height - box2.Height);
+                                    bool crossesWaterline = box1Wet != box2Wet;
 
-                                    if (bothWater || heightDiff <= Clicks.ToWorld(1))
+                                    if ((box1Wet && box2Wet) ||
+                                        (crossesWaterline ? heightDiff < Clicks.ToWorld(1) : heightDiff <= Clicks.ToWorld(1)))
                                         overlap.Flags |= OverlapFlags.AmphibiousTraversable;
 
                                     dec_overlaps.Add(overlap);
@@ -452,13 +462,14 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                         if (dec_monkey)
                                             overlap.Flags |= OverlapFlags.Monkey;
 
-                                        // Set AmphibiousTraversable flag
-                                        // Water-Water: always traversable
-                                        // Land-Land or Water-Land: traversable if height diff <= 1 click
-                                        bool bothWater = (box1.Water && box2.Water) || (box1.Shallow && box2.Shallow);
+                                        // Set AmphibiousTraversable flag (mirror of the forward-edge rule above).
+                                        bool box1Wet = box1.Water || box1.Shallow;
+                                        bool box2Wet = box2.Water || box2.Shallow;
                                         int heightDiff = Math.Abs(box1.Height - box2.Height);
+                                        bool crossesWaterline = box1Wet != box2Wet;
 
-                                        if (bothWater || heightDiff <= Clicks.ToWorld(1))
+                                        if ((box1Wet && box2Wet) ||
+                                            (crossesWaterline ? heightDiff < Clicks.ToWorld(1) : heightDiff <= Clicks.ToWorld(1)))
                                             overlap.Flags |= OverlapFlags.AmphibiousTraversable;
 
                                         dec_overlaps.Add(overlap);
@@ -1615,9 +1626,58 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             for (int z = startZ; z < endZ; z++)
             {
+                // Clamp for the test (own) side first so dec_doorCheck/splitter side
+                // effects mirror the original behaviour.
                 dec_room = test.Room;
-
                 if (!Dec_ClampRoom(test.Xmax - 1, z))
+                    return false;
+
+                // PORTAL-CONNECTIVITY CHECK: traverse wall portals from test.Room toward
+                // the box-side sector. If no real portal chain connects them at this
+                // boundary, reject the overlap -- otherwise two rooms whose world XZ
+                // rectangles merely touch get a "phantom" overlap and BFS paths through walls.
+                if (test.Room != box.Room)
+                {
+                    dec_room = test.Room;
+                    if (!Dec_ClampRoom(test.Xmax, z))
+                        return false;
+
+                    // FLOOR-CONTINUITY CHECK (water phantom-wall fix): the clamp can
+                    // "leak" when the rooms share a portal ANYWHERE along the boundary,
+                    // accepting an overlap through a wall at THIS sector. Sample the floor
+                    // as reached FROM THE TEST ROOM and require it equals box.Height --
+                    // a real edge has a continuous floor, a wall yields a mismatch.
+                    // Gated to WET boxes (deep OR shallow), where swim Step/Drop lets
+                    // BFS exploit the phantom edge.
+                    if ((test.Water || test.Shallow) && (box.Water || box.Shallow))
+                    {
+                        dec_splitter = false;
+                        bool seamContinuous = box.Height == Dec_GetHeight(test.Xmax, z);
+
+                        // STACKED-WATER RESCUE: when the test box's floor collapsed
+                        // through a vertical portal into a lower room, the test-side
+                        // sample reads the lower room and wrongly rejects a legit swim
+                        // seam. Probe the opposite direction (test seam sector from the
+                        // BOX room); a phantom seam mismatches BOTH ways and stays rejected.
+                        if (!seamContinuous)
+                        {
+                            dec_room = box.Room;
+                            if (Dec_ClampRoom(test.Xmax - 1, z))
+                            {
+                                dec_splitter = false;
+                                seamContinuous = test.Height == Dec_GetHeight(test.Xmax - 1, z);
+                            }
+                        }
+
+                        if (!seamContinuous)
+                            return false;
+                    }
+                }
+
+                // Re-resolve which room actually owns the box-side sector before
+                // sampling its floor height.
+                dec_room = box.Room;
+                if (!Dec_ClampRoom(test.Xmax, z))
                     return false;
 
                 dec_splitter = false;
@@ -1641,8 +1701,38 @@ namespace TombLib.LevelData.Compilers.TombEngine
             for (int z = startZ; z < endZ; z++)
             {
                 dec_room = test.Room;
+                if (!Dec_ClampRoom(test.Xmin, z))
+                    return false;
 
-                if (!Dec_ClampRoom(test.Xmin, z)) 
+                // Portal-connectivity + wet floor-continuity (see Dec_TestOverlapXmax).
+                if (test.Room != box.Room)
+                {
+                    dec_room = test.Room;
+                    if (!Dec_ClampRoom(test.Xmin - 1, z))
+                        return false;
+
+                    if ((test.Water || test.Shallow) && (box.Water || box.Shallow))
+                    {
+                        dec_splitter = false;
+                        bool seamContinuous = box.Height == Dec_GetHeight(test.Xmin - 1, z);
+
+                        if (!seamContinuous)
+                        {
+                            dec_room = box.Room;
+                            if (Dec_ClampRoom(test.Xmin, z))
+                            {
+                                dec_splitter = false;
+                                seamContinuous = test.Height == Dec_GetHeight(test.Xmin, z);
+                            }
+                        }
+
+                        if (!seamContinuous)
+                            return false;
+                    }
+                }
+
+                dec_room = box.Room;
+                if (!Dec_ClampRoom(test.Xmin - 1, z))
                     return false;
 
                 dec_splitter = false;
@@ -1666,8 +1756,38 @@ namespace TombLib.LevelData.Compilers.TombEngine
             for (int x = startX; x < endX; x++)
             {
                 dec_room = test.Room;
-
                 if (!Dec_ClampRoom(x, test.Zmax - 1))
+                    return false;
+
+                // Portal-connectivity + wet floor-continuity (see Dec_TestOverlapXmax).
+                if (test.Room != box.Room)
+                {
+                    dec_room = test.Room;
+                    if (!Dec_ClampRoom(x, test.Zmax))
+                        return false;
+
+                    if ((test.Water || test.Shallow) && (box.Water || box.Shallow))
+                    {
+                        dec_splitter = false;
+                        bool seamContinuous = box.Height == Dec_GetHeight(x, test.Zmax);
+
+                        if (!seamContinuous)
+                        {
+                            dec_room = box.Room;
+                            if (Dec_ClampRoom(x, test.Zmax - 1))
+                            {
+                                dec_splitter = false;
+                                seamContinuous = test.Height == Dec_GetHeight(x, test.Zmax - 1);
+                            }
+                        }
+
+                        if (!seamContinuous)
+                            return false;
+                    }
+                }
+
+                dec_room = box.Room;
+                if (!Dec_ClampRoom(x, test.Zmax))
                     return false;
 
                 dec_splitter = false;
@@ -1691,8 +1811,38 @@ namespace TombLib.LevelData.Compilers.TombEngine
             for (int x = startX; x < endX; x++)
             {
                 dec_room = test.Room;
-
                 if (!Dec_ClampRoom(x, test.Zmin))
+                    return false;
+
+                // Portal-connectivity + wet floor-continuity (see Dec_TestOverlapXmax).
+                if (test.Room != box.Room)
+                {
+                    dec_room = test.Room;
+                    if (!Dec_ClampRoom(x, test.Zmin - 1))
+                        return false;
+
+                    if ((test.Water || test.Shallow) && (box.Water || box.Shallow))
+                    {
+                        dec_splitter = false;
+                        bool seamContinuous = box.Height == Dec_GetHeight(x, test.Zmin - 1);
+
+                        if (!seamContinuous)
+                        {
+                            dec_room = box.Room;
+                            if (Dec_ClampRoom(x, test.Zmin))
+                            {
+                                dec_splitter = false;
+                                seamContinuous = test.Height == Dec_GetHeight(x, test.Zmin);
+                            }
+                        }
+
+                        if (!seamContinuous)
+                            return false;
+                    }
+                }
+
+                dec_room = box.Room;
+                if (!Dec_ClampRoom(x, test.Zmin - 1))
                     return false;
 
                 dec_splitter = false;
