@@ -114,6 +114,17 @@ namespace TombLib.LevelData.Compilers.TombEngine
             public const int UnflippedValid = 0x0001;
             public const int FlippedValid   = 0x0002;
             public const int RouteExitFloorHint = 0x0004;
+            // Independent flip-group conditions are packed into otherwise unused overlap bits.
+            // Groups are stored per edge because one box ID may be shared by several rooms.
+            public const int PairStateMaskShift = 3;
+            public const int PairStateMask = 0x0078;
+            public const int PairStateValidity = 0x0080;
+            public const int PairSourceGroupValidity = 0x0100;
+            public const int PairTargetGroupValidity = 0x0200;
+            public const int PairSourceGroupShift = 16;
+            public const int PairSourceGroupMask = 0x00FF0000;
+            public const int PairTargetGroupShift = 24;
+            public const int PairTargetGroupMask = unchecked((int)0xFF000000);
 
             public const int Jump = 0x0800;
             public const int Monkey = 0x2000;
@@ -346,9 +357,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
         /// Boxes in flip pairs only have one flag set, ensuring they only connect
         /// to boxes in the same flip state.
         ///
-        /// The algorithm processes overlaps in two passes:
-        /// 1. Unflipped pass: Check box pairs where both have Unflipped flag
-        /// 2. Flipped pass: Check box pairs where both have Flipped flag (skip if already done)
+        /// The compiler checks all-off, all-on and both mixed states for independent groups.
+        /// Cross-group results are merged into a four-bit state mask on the directed overlap.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         private bool Dec_BuildOverlaps()
@@ -449,9 +459,10 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 // Key = j (target box index), Value = index into dec_overlaps.
                 var overlapIndexByTarget = new Dictionary<int, int>();
 
-                void AddOrMergeOverlap(int targetBoxIndex, int validFlag, dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
+                void AddOrMergeOverlap(int targetBoxIndex, int validFlag, bool sourceFlipped, bool targetFlipped,
+                    dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
                 {
-                    var overlap = Dec_CreateOverlap(targetBoxIndex, validFlag, from, to);
+                    var overlap = Dec_CreateOverlap(targetBoxIndex, validFlag, sourceFlipped, targetFlipped, from, to);
 
                     if (overlapIndexByTarget.TryGetValue(targetBoxIndex, out int existingIdx))
                     {
@@ -492,7 +503,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                             {
                                 if (Dec_CheckOverlap(box1, box2))
                                 {
-                                    AddOrMergeOverlap(j, OverlapFlags.UnflippedValid, box1, box2);
+                                    AddOrMergeOverlap(j, OverlapFlags.UnflippedValid, false, false, box1, box2);
                                 }
                             }
                         }
@@ -525,7 +536,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                 // Always recheck Pass 2: alt geometry can invalidate a Pass 1 overlap.
                                 if (Dec_CheckOverlap(box1, box2))
                                 {
-                                    AddOrMergeOverlap(j, OverlapFlags.FlippedValid, box1, box2);
+                                    AddOrMergeOverlap(j, OverlapFlags.FlippedValid, true, true, box1, box2);
                                 }
                             }
                         }
@@ -573,7 +584,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                 try
                                 {
                                     if (Dec_CheckOverlap(box1, box2))
-                                        AddOrMergeOverlap(j, validFlag, box1, box2);
+                                        AddOrMergeOverlap(j, validFlag, sourceFlipped, targetFlipped, box1, box2);
                                 }
                                 finally
                                 {
@@ -603,13 +614,37 @@ namespace TombLib.LevelData.Compilers.TombEngine
             return true;
         }
 
-        private TombEngineOverlap Dec_CreateOverlap(int box, int validFlag, dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
+        private TombEngineOverlap Dec_CreateOverlap(int box, int validFlag, bool sourceFlipped, bool targetFlipped,
+            dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
         {
             var overlap = new TombEngineOverlap
             {
                 Box = box,
                 Flags = validFlag
             };
+
+            int sourceGroup = Dec_GetRoomFlipGroup(from.Room);
+            int targetGroup = Dec_GetRoomFlipGroup(to.Room);
+            if (sourceGroup != targetGroup && (sourceGroup >= 0 || targetGroup >= 0))
+            {
+                bool sourceState = sourceGroup >= 0 && sourceFlipped;
+                bool targetState = targetGroup >= 0 && targetFlipped;
+                int state = (sourceState ? 2 : 0) | (targetState ? 1 : 0);
+                overlap.Flags |= OverlapFlags.PairStateValidity;
+                overlap.Flags |= 1 << (OverlapFlags.PairStateMaskShift + state);
+
+                if (sourceGroup >= 0)
+                {
+                    overlap.Flags |= OverlapFlags.PairSourceGroupValidity;
+                    overlap.Flags |= (sourceGroup << OverlapFlags.PairSourceGroupShift) & OverlapFlags.PairSourceGroupMask;
+                }
+
+                if (targetGroup >= 0)
+                {
+                    overlap.Flags |= OverlapFlags.PairTargetGroupValidity;
+                    overlap.Flags |= (targetGroup << OverlapFlags.PairTargetGroupShift) & OverlapFlags.PairTargetGroupMask;
+                }
+            }
 
             if (dec_jump)
                 overlap.Flags |= OverlapFlags.Jump;
@@ -623,6 +658,23 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 overlap.Flags |= OverlapFlags.AmphibiousTraversable;
 
             return overlap;
+        }
+
+        private static bool Dec_IsOverlapValidForStates(int flags, bool sourceFlipped, bool targetFlipped)
+        {
+            if ((flags & OverlapFlags.PairStateValidity) != 0)
+            {
+                int state = (sourceFlipped ? 2 : 0) | (targetFlipped ? 1 : 0);
+                int stateMask = flags & OverlapFlags.PairStateMask;
+                return (stateMask & (1 << (OverlapFlags.PairStateMaskShift + state))) != 0;
+            }
+
+            int validMask = OverlapFlags.UnflippedValid | OverlapFlags.FlippedValid;
+            if ((flags & validMask) == 0)
+                return true;
+
+            int validBit = sourceFlipped ? OverlapFlags.FlippedValid : OverlapFlags.UnflippedValid;
+            return (flags & validBit) != 0;
         }
 
         private static int Dec_GetRoomFlipGroup(Room room)

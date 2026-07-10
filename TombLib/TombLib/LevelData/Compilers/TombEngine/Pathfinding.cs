@@ -382,9 +382,9 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     // treat boxes as connected when alt geometry actually walls them off
                     // (or vice versa), producing matching zone numbers that mislead the
                     // runtime BFS into routing through impassable terrain.
-                    int validBit = flipped ? OverlapFlags.FlippedValid : OverlapFlags.UnflippedValid;
-                    int validMask = OverlapFlags.UnflippedValid | OverlapFlags.FlippedValid;
-                    if ((overlapFlagsRaw & validMask) != 0 && (overlapFlagsRaw & validBit) == 0)
+                    bool sourceFlipped = Dec_GetRoomFlipGroup(dec_boxes[next].Room) >= 0 && flipped;
+                    bool targetFlipped = Dec_GetRoomFlipGroup(dec_boxes[boxIndex].Room) >= 0 && flipped;
+                    if (!Dec_IsOverlapValidForStates(overlapFlagsRaw, sourceFlipped, targetFlipped))
                         continue;
 
                     // Get target box properties
