@@ -162,6 +162,11 @@ namespace TombLib.LevelData.Compilers.TombEngine
         private bool dec_flipped;
 
         /// <summary>
+        /// Optional per-flip-group state override for mixed flipmap overlap checks.
+        /// </summary>
+        private Dictionary<int, bool> dec_flipGroupOverrides;
+
+        /// <summary>
         /// Flag set by Dec_CheckOverlap when boxes are connected via a jump.
         /// Used to set the JUMP_BIT (0x0800) flag on the overlap.
         /// </summary>
@@ -439,10 +444,31 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
                 int numOverlapsAdded = 0;
 
-                // Track Pass 1 entries by target box so Pass 2 can merge into the
-                // existing entry (set FlippedValid) instead of adding a duplicate.
+                // Track entries by target box so later passes can merge flags into the
+                // existing entry instead of adding duplicates.
                 // Key = j (target box index), Value = index into dec_overlaps.
-                var pass1Index = new Dictionary<int, int>();
+                var overlapIndexByTarget = new Dictionary<int, int>();
+
+                void AddOrMergeOverlap(int targetBoxIndex, int validFlag, dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
+                {
+                    var overlap = Dec_CreateOverlap(targetBoxIndex, validFlag, from, to);
+
+                    if (overlapIndexByTarget.TryGetValue(targetBoxIndex, out int existingIdx))
+                    {
+                        var existing = dec_overlaps[existingIdx];
+                        existing.Flags |= overlap.Flags & ~OverlapFlags.End;
+                        dec_overlaps[existingIdx] = existing;
+                    }
+                    else
+                    {
+                        if (dec_boxes[i].OverlapIndex == -1)
+                            dec_boxes[i].OverlapIndex = dec_overlaps.Count;
+
+                        overlapIndexByTarget[targetBoxIndex] = dec_overlaps.Count;
+                        dec_overlaps.Add(overlap);
+                        numOverlapsAdded++;
+                    }
+                }
 
                 // ===============================================================================
                 // PASS 1: Check overlaps in UNFLIPPED state
@@ -466,15 +492,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                             {
                                 if (Dec_CheckOverlap(box1, box2))
                                 {
-                                    // First overlap for this box - record starting index
-                                    if (dec_boxes[i].OverlapIndex == -1)
-                                        dec_boxes[i].OverlapIndex = dec_overlaps.Count;
-
-                                    var overlap = Dec_CreateOverlap(j, OverlapFlags.UnflippedValid, box1, box2);
-
-                                    pass1Index[j] = dec_overlaps.Count;
-                                    dec_overlaps.Add(overlap);
-                                    numOverlapsAdded++;
+                                    AddOrMergeOverlap(j, OverlapFlags.UnflippedValid, box1, box2);
                                 }
                             }
                         }
@@ -507,25 +525,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                 // Always recheck Pass 2: alt geometry can invalidate a Pass 1 overlap.
                                 if (Dec_CheckOverlap(box1, box2))
                                 {
-                                    if (pass1Index.TryGetValue(j, out int existingIdx))
-                                    {
-                                        // Pair already added by Pass 1; merge flip flag.
-                                        var existing = dec_overlaps[existingIdx];
-                                        existing.Flags |= OverlapFlags.FlippedValid;
-                                        if (dec_routeExitFloorHint)
-                                            existing.Flags |= OverlapFlags.RouteExitFloorHint;
-                                        dec_overlaps[existingIdx] = existing;
-                                    }
-                                    else
-                                    {
-                                        if (dec_boxes[i].OverlapIndex == -1)
-                                            dec_boxes[i].OverlapIndex = dec_overlaps.Count;
-
-                                        var overlap = Dec_CreateOverlap(j, OverlapFlags.FlippedValid, box1, box2);
-
-                                        dec_overlaps.Add(overlap);
-                                        numOverlapsAdded++;
-                                    }
+                                    AddOrMergeOverlap(j, OverlapFlags.FlippedValid, box1, box2);
                                 }
                             }
                         }
@@ -534,6 +534,61 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     }
                     while (j < dec_boxes.Count);
                 }
+
+                // ===============================================================================
+                // PASS 3: Mixed flip-group seams.
+                // ===============================================================================
+                // Independent flipmaps can be active in different states at runtime. The normal
+                // all-unflipped/all-flipped passes never test pairs such as room A unflipped
+                // against room B flipped, so seam overlaps between those active boxes would be
+                // missing and had to be synthesized by runtime fallback.
+                void CheckMixedPass(bool sourceFlipped, bool targetFlipped, int validFlag)
+                {
+                    int sourceGroup = Dec_GetRoomFlipGroup(box1.Room);
+                    if (sourceGroup < 0)
+                        return;
+
+                    if (sourceFlipped ? !box1.Flipped : !box1.Unflipped)
+                        return;
+
+                    dec_flipped = sourceFlipped;
+                    j = 0;
+                    do
+                    {
+                        if (i != j)
+                        {
+                            var box2 = dec_boxes[j];
+                            int targetGroup = Dec_GetRoomFlipGroup(box2.Room);
+                            if (targetGroup >= 0 &&
+                                targetGroup != sourceGroup &&
+                                (targetFlipped ? box2.Flipped : box2.Unflipped))
+                            {
+                                var oldOverrides = dec_flipGroupOverrides;
+                                dec_flipGroupOverrides = new Dictionary<int, bool>
+                                {
+                                    [sourceGroup] = sourceFlipped,
+                                    [targetGroup] = targetFlipped
+                                };
+
+                                try
+                                {
+                                    if (Dec_CheckOverlap(box1, box2))
+                                        AddOrMergeOverlap(j, validFlag, box1, box2);
+                                }
+                                finally
+                                {
+                                    dec_flipGroupOverrides = oldOverrides;
+                                }
+                            }
+                        }
+
+                        j++;
+                    }
+                    while (j < dec_boxes.Count);
+                }
+
+                CheckMixedPass(false, true, OverlapFlags.UnflippedValid);
+                CheckMixedPass(true, false, OverlapFlags.FlippedValid);
 
                 i++;
 
@@ -583,10 +638,24 @@ namespace TombLib.LevelData.Compilers.TombEngine
             return firstGroup < 0 || secondGroup < 0 || firstGroup == secondGroup;
         }
 
+        private bool Dec_IsRoomFlippedForOverlap(Room room)
+        {
+            int group = Dec_GetRoomFlipGroup(room);
+            if (group >= 0 &&
+                dec_flipGroupOverrides != null &&
+                dec_flipGroupOverrides.TryGetValue(group, out bool flipped))
+                return flipped;
+
+            return dec_flipped;
+        }
+
         private Room Dec_GetAdjoiningRoomForFlipPass(Room currentRoom, Room adjoiningRoom)
         {
-            if (!dec_flipped || adjoiningRoom?.AlternateRoom == null)
+            if (!Dec_IsRoomFlippedForOverlap(adjoiningRoom) || adjoiningRoom?.AlternateRoom == null)
                 return adjoiningRoom;
+
+            if (dec_flipGroupOverrides != null)
+                return adjoiningRoom.AlternateRoom;
 
             if (!currentRoom.Alternated || currentRoom.AlternateGroup == adjoiningRoom.AlternateGroup)
                 return adjoiningRoom.AlternateRoom;
@@ -1742,14 +1811,14 @@ namespace TombLib.LevelData.Compilers.TombEngine
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         private Room Dec_GetRoomForFlipPass(Room r)
         {
-            if (dec_flipped && r != null && r.AlternateRoom != null)
+            if (Dec_IsRoomFlippedForOverlap(r) && r != null && r.AlternateRoom != null)
                 return r.AlternateRoom;
             return r;
         }
 
         private bool Dec_BoxesShareVerticalPortal(dec_TombEngine_box_aux a, dec_TombEngine_box_aux b)
         {
-            if (a.Room == b.Room || Math.Abs(a.Height - b.Height) > Clicks.ToWorld(4))
+            if (a.Room == b.Room)
                 return false;
 
             int startX = Math.Max(a.Xmin, b.Xmin);
@@ -1767,7 +1836,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 return false;
 
             bool isSameFlipRoom(Room room, Room expected) =>
-                room == expected || (dec_flipped && room?.AlternateRoom == expected);
+                room == expected || (Dec_IsRoomFlippedForOverlap(room) && room?.AlternateRoom == expected);
 
             bool hasPortalTo(Room room, int x, int z, bool ceiling, Room expected)
             {
@@ -1797,9 +1866,11 @@ namespace TombLib.LevelData.Compilers.TombEngine
             return false;
         }
 
-        private bool Dec_NeedsRouteExitFloorHint(dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
+        private bool Dec_NeedsGroundRouteExitFloorHint(dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
         {
             int heightDiff = Math.Abs(from.Height - to.Height);
+            // Runtime consumes this only for ground creatures' floor probe retry;
+            // water/flyer traversal is still governed by normal LOT Step/Drop.
             if (heightDiff == 0 || heightDiff > Clicks.ToWorld(4))
                 return false;
 
@@ -2030,7 +2101,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 }
 
                 if (box1.Monkey && box2.Monkey) dec_monkey = true;
-                dec_routeExitFloorHint = Dec_NeedsRouteExitFloorHint(a, b);
+                dec_routeExitFloorHint = Dec_NeedsGroundRouteExitFloorHint(a, b);
                 return true;
             }
 
@@ -2045,7 +2116,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     if (!Dec_BoxesShareVerticalPortal(a, b))
                         return false;
 
-                    dec_routeExitFloorHint = Dec_NeedsRouteExitFloorHint(a, b);
+                    dec_routeExitFloorHint = Dec_NeedsGroundRouteExitFloorHint(a, b);
                     return true;
                 }
 
@@ -2080,7 +2151,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             }
 
             if (box1.Monkey && box2.Monkey) dec_monkey = true;
-            dec_routeExitFloorHint = Dec_NeedsRouteExitFloorHint(a, b);
+            dec_routeExitFloorHint = Dec_NeedsGroundRouteExitFloorHint(a, b);
             return true;
         }
     }
