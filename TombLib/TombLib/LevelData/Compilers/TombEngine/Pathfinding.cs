@@ -295,6 +295,16 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 if (group == -1 && bothGroup != -1)
                     group = bothGroup;
 
+                // A sector above a vertical portal can store a fallback box whose floor comes
+                // from another flip group. Its validity follows that floor, while the active
+                // room scan already accounts for the state of the sector's own room.
+                int floorGroup = dec_boxes[box].FloorFlipDependencyGroup;
+                if (floorGroup >= 0)
+                {
+                    group = floorGroup;
+                    native = dec_boxes[box].FloorFlipDependencyState == 2 ? 1 : 0;
+                }
+
                 int encodedGroup = (group >= 0) ? group + 1 : 0;
                 metadata[box] = BoxFlags.FlipMetadata |
                     ((encodedGroup << BoxFlags.FlipGroupShift) & BoxFlags.FlipGroupMask) |
