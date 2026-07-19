@@ -547,6 +547,26 @@ namespace TombLib.LevelData.Compilers.TombEngine
         public int Flags;
     }
 
+    public class TombEngineSectorBoxCondition
+    {
+        public int Group;
+        public bool Flipped;
+    }
+
+    public class TombEngineSectorBoxCase
+    {
+        public int Box;
+        public List<TombEngineSectorBoxCondition> Conditions = new List<TombEngineSectorBoxCondition>();
+    }
+
+    public class TombEngineSectorBoxVariants
+    {
+        public int Room;
+        public int Sector;
+        public int DefaultBox;
+        public List<TombEngineSectorBoxCase> Cases = new List<TombEngineSectorBoxCase>();
+    }
+
     [StructLayout(LayoutKind.Sequential, Pack = 1)]
     public class TombEngineZoneGroup
     {

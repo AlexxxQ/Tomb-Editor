@@ -333,6 +333,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             }
 
             dec_flipped = false;
+            Dec_BuildSectorBoxVariants();
 
             watch.Stop();
             Console.WriteLine("Dec_BuildBoxesAndOverlaps() -> Build boxes: " + watch.ElapsedMilliseconds + " ms, Count = " + dec_boxes.Count);
@@ -346,6 +347,121 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             watch.Stop();
             Console.WriteLine("Dec_BuildBoxesAndOverlaps() -> Build overlaps: " + watch.ElapsedMilliseconds + " ms, Count = " + dec_overlaps.Count);
+        }
+
+        private HashSet<int> Dec_GetLocalFlipDependencyGroups(Room room, int x, int z)
+        {
+            var groups = new HashSet<int>();
+            bool savedFlipped = dec_flipped;
+            var savedOverrides = dec_flipGroupOverrides;
+            Room savedRoom = dec_room;
+            int savedSourceGroup = dec_boxSourceFlipGroup;
+
+            dec_flipGroupOverrides = null;
+            dec_boxSourceFlipGroup = Dec_GetRoomFlipGroup(room);
+            foreach (var offset in new[] { (0, 0), (-1, 0), (1, 0), (0, -1), (0, 1) })
+            {
+                dec_room = room;
+                bool slope;
+                Dec_GetHeight(room.Position.X + x + offset.Item1,
+                    room.Position.Z + z + offset.Item2, out slope);
+
+                if (dec_floorFlipDependencyGroup >= 0)
+                    groups.Add(dec_floorFlipDependencyGroup);
+            }
+
+            dec_room = savedRoom;
+            dec_boxSourceFlipGroup = savedSourceGroup;
+            dec_flipGroupOverrides = savedOverrides;
+            dec_flipped = savedFlipped;
+            return groups;
+        }
+
+        private void Dec_BuildSectorBoxVariants()
+        {
+            _sectorBoxVariants.Clear();
+
+            bool savedFlipped = dec_flipped;
+            var savedOverrides = dec_flipGroupOverrides;
+
+            foreach (Room room in _level.Rooms)
+            {
+                if (room == null || !_tempRooms.TryGetValue(room, out TombEngineRoom tempRoom))
+                    continue;
+
+                bool sourceFlipped = room.AlternateBaseRoom != null;
+                for (int z = 1; z < room.NumZSectors - 1; z++)
+                {
+                    for (int x = 1; x < room.NumXSectors - 1; x++)
+                    {
+                        int sectorIndex = tempRoom.NumZSectors * x + z;
+                        int defaultBox = tempRoom.Sectors[sectorIndex].BoxIndex;
+                        if (defaultBox < 0 || defaultBox >= dec_boxes.Count)
+                            continue;
+
+                        var dependencyGroups = new List<int>(Dec_GetLocalFlipDependencyGroups(room, x, z));
+                        dependencyGroups.Sort();
+                        if (dependencyGroups.Count == 0 || dependencyGroups.Count > 4)
+                            continue;
+
+                        int CompileVariant(int stateMask)
+                        {
+                            dec_flipped = sourceFlipped;
+                            dec_flipGroupOverrides = new Dictionary<int, bool>();
+                            for (int groupIndex = 0; groupIndex < dependencyGroups.Count; groupIndex++)
+                                dec_flipGroupOverrides[dependencyGroups[groupIndex]] =
+                                    (stateMask & (1 << groupIndex)) != 0;
+
+                            var variantBox = new dec_TombEngine_box_aux();
+                            if (!Dec_GetBox(variantBox, x, z, room))
+                                return -1;
+
+                            int existingBox = Dec_FindBox(variantBox);
+                            return existingBox >= 0 ? existingBox : int.MinValue;
+                        }
+
+                        var variants = new TombEngineSectorBoxVariants
+                        {
+                            Room = _roomRemapping[room],
+                            Sector = sectorIndex,
+                            DefaultBox = defaultBox
+                        };
+
+                        bool allStatesAvailable = true;
+                        int stateCount = 1 << dependencyGroups.Count;
+                        for (int stateMask = 0; stateMask < stateCount; stateMask++)
+                        {
+                            int variantBox = CompileVariant(stateMask);
+                            if (variantBox == int.MinValue)
+                            {
+                                allStatesAvailable = false;
+                                break;
+                            }
+
+                            if (variantBox == defaultBox)
+                                continue;
+
+                            var boxCase = new TombEngineSectorBoxCase { Box = variantBox };
+                            for (int groupIndex = 0; groupIndex < dependencyGroups.Count; groupIndex++)
+                            {
+                                boxCase.Conditions.Add(new TombEngineSectorBoxCondition
+                                {
+                                    Group = dependencyGroups[groupIndex],
+                                    Flipped = (stateMask & (1 << groupIndex)) != 0
+                                });
+                            }
+
+                            variants.Cases.Add(boxCase);
+                        }
+
+                        if (allStatesAvailable && variants.Cases.Count > 0)
+                            _sectorBoxVariants.Add(variants);
+                    }
+                }
+            }
+
+            dec_flipGroupOverrides = savedOverrides;
+            dec_flipped = savedFlipped;
         }
 
         /// <summary>
@@ -752,6 +868,25 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 dec_floorFlipDependencyState == dependencyState &&
                 dec_floorFlipCounterpartSignature == dec_boxFloorCounterpartSignature &&
                 dec_verticalPortalSignature == dec_boxVerticalPortalSignature;
+        }
+
+        private int Dec_FindBox(dec_TombEngine_box_aux box)
+        {
+            for (int i = 0; i < dec_boxes.Count; i++)
+            {
+                var candidate = dec_boxes[i];
+                if (candidate.Xmin == box.Xmin &&
+                    candidate.Xmax == box.Xmax &&
+                    candidate.Zmin == box.Zmin &&
+                    candidate.Zmax == box.Zmax &&
+                    candidate.Height == box.Height &&
+                    Dec_CanShareBoxIdentity(candidate, box))
+                {
+                    return i;
+                }
+            }
+
+            return -1;
         }
 
         /// <summary>

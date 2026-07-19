@@ -234,6 +234,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             ReportProgress(52, "    Number of boxes/zones: " + _boxes.Count);
             ReportProgress(52, "    Number of overlaps: " + _overlaps.Count);
+            ReportProgress(52, "    Number of sector box variant sets: " + _sectorBoxVariants.Count);
         }
 
         private int[] BuildCompiledBoxFlipMetadata()
