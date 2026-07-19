@@ -8,6 +8,14 @@ using TombLib.LevelData.SectorEnums;
 
 namespace TombLib.LevelData.Compilers.TombEngine
 {
+    public enum TombEngineBoxEnvironment : byte
+    {
+        Dry,
+        Water,
+        ShallowWater,
+        Quicksand
+    }
+
     /*
      * =============================================================================================
      * TOMBENGINE PATHFINDING SYSTEM - BOX AND OVERLAP GENERATION
@@ -33,7 +41,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
      * ALGORITHM OVERVIEW:
      * -------------------
      * 1. For each sector in each room, try to create/expand a box (spiral expansion)
-     * 2. Deduplicate boxes (same bounds + height + water = same box)
+     * 2. Deduplicate boxes (same bounds + height + environment = same box)
      * 3. For each pair of boxes, check if they overlap/connect
      * 4. Store overlap connections with capability flags (jump, monkey swing)
      * =============================================================================================
@@ -69,6 +77,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
         public bool Jump;          // Box requires jumping to reach (set during overlap check)
         public bool Water;         // Box is in a water room
         public bool Shallow;       // Box is in shallow water (water depth <= 1 click)
+        public TombEngineBoxEnvironment Environment; // Prevents dry/water/quicksand mixing
 
         // =========================================================================================
         // FLIP STATE FLAGS
@@ -162,6 +171,9 @@ namespace TombLib.LevelData.Compilers.TombEngine
         /// Used to set the SHALLOW flag (0x0400) on the box.
         /// </summary>
         private bool dec_shallowWater;
+        private bool dec_lastShallowWater;
+
+        private TombEngineBoxEnvironment dec_boxEnvironment;
 
         /// <summary>
         /// Flag set by Dec_GetHeight when a MONKEY is encountered.
@@ -832,6 +844,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 first.SectorRoom == second.SectorRoom;
 
             return compatibleRooms &&
+                first.Environment == second.Environment &&
                 first.FloorFlipDependencyGroup == second.FloorFlipDependencyGroup &&
                 first.FloorFlipDependencyState == second.FloorFlipDependencyState &&
                 first.FloorFlipCounterpartSignature == second.FloorFlipCounterpartSignature;
@@ -861,9 +874,24 @@ namespace TombLib.LevelData.Compilers.TombEngine
             return adjoiningRoom.AlternateRoom;
         }
 
+        private TombEngineBoxEnvironment Dec_GetBoxEnvironment()
+        {
+            if (dec_lastShallowWater)
+                return TombEngineBoxEnvironment.ShallowWater;
+
+            if (dec_room.Properties.Type == RoomType.Water)
+                return TombEngineBoxEnvironment.Water;
+
+            if (dec_room.Properties.Type == RoomType.Quicksand)
+                return TombEngineBoxEnvironment.Quicksand;
+
+            return TombEngineBoxEnvironment.Dry;
+        }
+
         private bool Dec_BoxFloorMatches(int x, int z, int floor, int dependencyGroup, byte dependencyState)
         {
             return Dec_GetHeight(x, z) == floor &&
+                Dec_GetBoxEnvironment() == dec_boxEnvironment &&
                 dec_floorFlipDependencyGroup == dependencyGroup &&
                 dec_floorFlipDependencyState == dependencyState &&
                 dec_floorFlipCounterpartSignature == dec_boxFloorCounterpartSignature &&
@@ -1093,6 +1121,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // ===================================================================================
             bool slope;
             int floor = Dec_GetHeight(currentX, currentZ, out slope);
+            dec_boxEnvironment = Dec_GetBoxEnvironment();
             int floorDependencyGroup = dec_floorFlipDependencyGroup;
             byte floorDependencyState = dec_floorFlipDependencyState;
             dec_boxFloorCounterpartSignature = dec_floorFlipCounterpartSignature;
@@ -1140,6 +1169,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 box.Water = false;
             }
             box.Shallow = dec_shallowWater;
+            box.Environment = dec_boxEnvironment;
 
             // ===================================================================================
             // SPLITTER BOX - Single sector box
@@ -1653,6 +1683,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
         private int Dec_GetHeight(int x, int z, out bool slope)
         {
             slope = false;
+            dec_lastShallowWater = false;
             dec_floorFlipDependencyGroup = -1;
             dec_floorFlipDependencyState = 0;
             dec_floorFlipCounterpartSignature = int.MinValue;
@@ -1722,6 +1753,17 @@ namespace TombLib.LevelData.Compilers.TombEngine
             {
                 adjoiningRoom = sector.FloorPortal.AdjoiningRoom;
                 adjoiningRoom = Dec_GetAdjoiningRoomForFlipPass(room, adjoiningRoom);
+
+                // Keep the box on its own side of a liquid boundary. A dry room
+                // above water must retain its platform height instead of inheriting
+                // the floor height from the room below.
+                bool roomIsLiquid = room.Properties.Type == RoomType.Water ||
+                    room.Properties.Type == RoomType.Quicksand;
+                bool adjoiningRoomIsLiquid = adjoiningRoom.Properties.Type == RoomType.Water ||
+                    adjoiningRoom.Properties.Type == RoomType.Quicksand;
+                if (roomIsLiquid != adjoiningRoomIsLiquid ||
+                    roomIsLiquid && room.Properties.Type != adjoiningRoom.Properties.Type)
+                    break;
 
                 if (sector.FloorPortal.Opacity == PortalOpacity.SolidFaces)
                 {
@@ -1807,6 +1849,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 {
                     dec_checkUnderwater = delta > Clicks.ToWorld(1);
                     dec_shallowWater = true;
+                    dec_lastShallowWater = true;
                 }
             }
 
