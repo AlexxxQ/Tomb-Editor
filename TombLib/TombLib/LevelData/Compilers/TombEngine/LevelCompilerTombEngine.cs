@@ -61,7 +61,6 @@ namespace TombLib.LevelData.Compilers.TombEngine
         private List<TombEngineBox> _boxes = new List<TombEngineBox>();
         private List<TombEngineOverlap> _overlaps = new List<TombEngineOverlap>();
         private List<TombEngineSectorBoxVariants> _sectorBoxVariants = new List<TombEngineSectorBoxVariants>();
-        private List<TombEngineZoneGroup> _zones = new List<TombEngineZoneGroup>();
         private List<TombEngineMirror> _mirrors = new List<TombEngineMirror>();
 
         private readonly List<TombEngineItem> _items = new List<TombEngineItem>();

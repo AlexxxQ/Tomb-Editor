@@ -8,14 +8,6 @@ using TombLib.LevelData.SectorEnums;
 
 namespace TombLib.LevelData.Compilers.TombEngine
 {
-    public enum TombEngineBoxEnvironment : byte
-    {
-        Dry,
-        Water,
-        ShallowWater,
-        Quicksand
-    }
-
     /*
      * =============================================================================================
      * TOMBENGINE PATHFINDING SYSTEM - BOX AND OVERLAP GENERATION
@@ -31,7 +23,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
      * ----------------
      * - Box: A rectangular walkable floor region with uniform height
      * - Overlap: A connection between two boxes with movement capability flags
-     * - Zone: Groups of boxes reachable by a specific enemy type (computed in Pathfinding.cs)
+     * - Zone: Runtime connectivity groups rebuilt by the engine for the active flip state
      *
      * COORDINATE SYSTEM:
      * ------------------
@@ -41,7 +33,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
      * ALGORITHM OVERVIEW:
      * -------------------
      * 1. For each sector in each room, try to create/expand a box (spiral expansion)
-     * 2. Deduplicate boxes (same bounds + height + environment = same box)
+     * 2. Deduplicate boxes (same bounds + height + water = same box)
      * 3. For each pair of boxes, check if they overlap/connect
      * 4. Store overlap connections with capability flags (jump, monkey swing)
      * =============================================================================================
@@ -77,16 +69,13 @@ namespace TombLib.LevelData.Compilers.TombEngine
         public bool Jump;          // Box requires jumping to reach (set during overlap check)
         public bool Water;         // Box is in a water room
         public bool Shallow;       // Box is in shallow water (water depth <= 1 click)
-        public TombEngineBoxEnvironment Environment; // Prevents dry/water/quicksand mixing
 
         // =========================================================================================
         // FLIP STATE FLAGS
         // =========================================================================================
-        // These flags track which room states the box exists in.
-        // A box in a non-flipped room has both flags set (exists in both states).
-        // A box in a flip pair has only one flag set.
-        public bool Unflipped;     // Box exists in normal (unflipped) room state
-        public bool Flipped;       // Box exists in alternate (flipped) room state
+        // Bit 0 is the normal room state; bit 1 is the alternate room state.
+        // Non-flipped rooms exist in both states.
+        public byte RoomStateMask;
 
         // =========================================================================================
         // ROOM REFERENCE
@@ -103,6 +92,9 @@ namespace TombLib.LevelData.Compilers.TombEngine
     /// </summary>
     public sealed partial class LevelCompilerTombEngine
     {
+        private const byte RoomStateUnflipped = 1;
+        private const byte RoomStateFlipped = 2;
+
         public class BoxFlags
         {
             public const int Water		= 0x0200;
@@ -113,19 +105,10 @@ namespace TombLib.LevelData.Compilers.TombEngine
             public const int Blocked	= 0x4000;
             public const int Splitter	= 0x8000;
 
-            public const int FlipGroupShift = 16;
-            public const int FlipGroupMask = 0x01FF0000; // 9 bits: stored as group + 1, 0 = no group.
-            public const int FlipNativeShift = 25;
-            public const int FlipNativeMask = 0x06000000; // 0 = base-only, 1 = alt-only, 2 = both.
-            public const int FlipMetadata = 0x08000000;
-            public const int MaxFlipGroups = 256;
         }
 
         public class OverlapFlags
         {
-            // Flip-state validity: runtime rejects overlaps missing the current pass bit.
-            public const int UnflippedValid = 0x0001;
-            public const int FlippedValid   = 0x0002;
             public const int RouteExitFloorHint = 0x0004;
             // Independent flip-group conditions are packed into otherwise unused overlap bits.
             // Groups are stored per edge because one box ID may be shared by several rooms.
@@ -171,9 +154,6 @@ namespace TombLib.LevelData.Compilers.TombEngine
         /// Used to set the SHALLOW flag (0x0400) on the box.
         /// </summary>
         private bool dec_shallowWater;
-        private bool dec_lastShallowWater;
-
-        private TombEngineBoxEnvironment dec_boxEnvironment;
 
         /// <summary>
         /// Flag set by Dec_GetHeight when a MONKEY is encountered.
@@ -395,6 +375,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             bool savedFlipped = dec_flipped;
             var savedOverrides = dec_flipGroupOverrides;
+            var variantOverrides = new Dictionary<int, bool>();
 
             foreach (Room room in _level.Rooms)
             {
@@ -413,13 +394,14 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
                         var dependencyGroups = new List<int>(Dec_GetLocalFlipDependencyGroups(room, x, z));
                         dependencyGroups.Sort();
-                        if (dependencyGroups.Count == 0 || dependencyGroups.Count > 4)
+                        if (dependencyGroups.Count == 0)
                             continue;
 
                         int CompileVariant(int stateMask)
                         {
                             dec_flipped = sourceFlipped;
-                            dec_flipGroupOverrides = new Dictionary<int, bool>();
+                            variantOverrides.Clear();
+                            dec_flipGroupOverrides = variantOverrides;
                             for (int groupIndex = 0; groupIndex < dependencyGroups.Count; groupIndex++)
                                 dec_flipGroupOverrides[dependencyGroups[groupIndex]] =
                                     (stateMask & (1 << groupIndex)) != 0;
@@ -428,45 +410,26 @@ namespace TombLib.LevelData.Compilers.TombEngine
                             if (!Dec_GetBox(variantBox, x, z, room))
                                 return -1;
 
-                            int existingBox = Dec_FindBox(variantBox);
-                            return existingBox >= 0 ? existingBox : int.MinValue;
+                            return Dec_AddBox(variantBox, mergeExisting: false);
                         }
 
                         var variants = new TombEngineSectorBoxVariants
                         {
                             Room = _roomRemapping[room],
-                            Sector = sectorIndex,
-                            DefaultBox = defaultBox
+                            Sector = sectorIndex
                         };
+                        variants.Groups.AddRange(dependencyGroups);
 
-                        bool allStatesAvailable = true;
+                        bool hasVariation = false;
                         int stateCount = 1 << dependencyGroups.Count;
                         for (int stateMask = 0; stateMask < stateCount; stateMask++)
                         {
                             int variantBox = CompileVariant(stateMask);
-                            if (variantBox == int.MinValue)
-                            {
-                                allStatesAvailable = false;
-                                break;
-                            }
-
-                            if (variantBox == defaultBox)
-                                continue;
-
-                            var boxCase = new TombEngineSectorBoxCase { Box = variantBox };
-                            for (int groupIndex = 0; groupIndex < dependencyGroups.Count; groupIndex++)
-                            {
-                                boxCase.Conditions.Add(new TombEngineSectorBoxCondition
-                                {
-                                    Group = dependencyGroups[groupIndex],
-                                    Flipped = (stateMask & (1 << groupIndex)) != 0
-                                });
-                            }
-
-                            variants.Cases.Add(boxCase);
+                            variants.Boxes.Add(variantBox);
+                            hasVariation |= variantBox != defaultBox;
                         }
 
-                        if (allStatesAvailable && variants.Cases.Count > 0)
+                        if (hasVariation)
                             _sectorBoxVariants.Add(variants);
                     }
                 }
@@ -491,14 +454,11 @@ namespace TombLib.LevelData.Compilers.TombEngine
         ///
         /// FLIP STATE HANDLING:
         /// ====================
-        /// Boxes in non-flipped rooms get both Unflipped and Flipped flags set,
-        /// allowing them to connect to boxes in either state.
-        ///
-        /// Boxes in flip pairs only have one flag set, ensuring they only connect
-        /// to boxes in the same flip state.
+        /// Non-flipped rooms set both bits in RoomStateMask; rooms in a flip pair set
+        /// only the bit for the state in which their geometry exists.
         ///
         /// The compiler checks all-off, all-on and both mixed states for independent groups.
-        /// Cross-group results are merged into a four-bit state mask on the directed overlap.
+        /// Results involving any flip group are merged into a four-bit state mask.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         private bool Dec_BuildOverlaps()
@@ -510,79 +470,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             int i = 0;
             int j = 0;
-
-            // ===================================================================================
-            // PRE-PROCESS: Set flip flags for boxes in non-flipped rooms
-            // ===================================================================================
-            // Boxes in rooms without flip pairs should be accessible from both flip states.
-            // This is a workaround because TombEditor doesn't support FlipAllRooms().
-            // In original code, FlipAllRooms() would cause these boxes to be processed twice.
-            for (int k = 0; k < dec_boxes.Count; k++)
-            {
-                if (!_tempRooms[dec_boxes[k].SectorRoom].Flipped)
-                {
-                    dec_boxes[k].Unflipped = true;
-                    dec_boxes[k].Flipped = true;
-                }
-            }
-
-            // ===================================================================================
-            // PRE-PROCESS: Merge flip-state flags between flip-pair partner boxes
-            // ===================================================================================
-            // When a Pass 0 (base) box and a Pass 1 (alt) box geometrically overlap (2D bbox
-            // intersection) AND share the same floor height, they represent the same physical
-            // floor area in different flip states -- one is the base version, the other the
-            // alternate. In every flip state at runtime the underlying sectors point to one or
-            // the other of these boxes, so they must logically belong to the same flip-state
-            // zone cluster.
-            //
-            // Without this merge, a base-only box (Unflipped=true, Flipped=false) that shares
-            // area with an alt-only box becomes zone-isolated in the flipped pass. Creatures
-            // that pass between the base box (via a non-alternated neighbour room) and the alt
-            // box (in the active flipped room) trigger ZONE_MISMATCH and get pushed back. This
-            // is the "yeti vault" symptom: vault triggers, creature climbs up onto a sector
-            // whose box is the base-only floor box, runtime sees its zone differs from the
-            // creature's stored box in cluster 1, pushes it back.
-            //
-            // O(N^2) but N is hundreds at most -- negligible relative to overall compile time.
-            for (int a = 0; a < dec_boxes.Count; a++)
-            {
-                var boxA = dec_boxes[a];
-                // Skip boxes that already carry both flags -- nothing to learn from a partner.
-                if (boxA.Unflipped && boxA.Flipped)
-                    continue;
-
-                for (int b = 0; b < dec_boxes.Count; b++)
-                {
-                    if (a == b)
-                        continue;
-
-                    var boxB = dec_boxes[b];
-
-                    // Must be same floor height -- different heights mean different physical
-                    // floors (e.g. a stair box at one click up does NOT pair with the surface
-                    // it sits on).
-                    if (boxA.Height != boxB.Height)
-                        continue;
-
-                    // Flip partners must be identical boxes, not subset/superset overlaps.
-                    if (boxA.Xmin != boxB.Xmin || boxA.Xmax != boxB.Xmax)
-                        continue;
-                    if (boxA.Zmin != boxB.Zmin || boxA.Zmax != boxB.Zmax)
-                        continue;
-
-                    if (!Dec_CanShareBoxIdentity(boxA, boxB))
-                        continue;
-
-                    // True flip-pair partners (identical bounds + height). Merge flags.
-                    dec_boxes[a].Unflipped |= boxB.Unflipped;
-                    dec_boxes[a].Flipped   |= boxB.Flipped;
-
-                    // Early-out if A is now fully flagged.
-                    if (dec_boxes[a].Unflipped && dec_boxes[a].Flipped)
-                        break;
-                }
-            }
+            var overlapIndexByTarget = new Dictionary<int, int>();
+            var mixedOverrides = new Dictionary<int, bool>(2);
 
             // ===================================================================================
             // MAIN LOOP: Check all box pairs for overlaps
@@ -597,12 +486,12 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 // Track entries by target box so later passes can merge flags into the
                 // existing entry instead of adding duplicates.
                 // Key = j (target box index), Value = index into dec_overlaps.
-                var overlapIndexByTarget = new Dictionary<int, int>();
+                overlapIndexByTarget.Clear();
 
-                void AddOrMergeOverlap(int targetBoxIndex, int validFlag, bool sourceFlipped, bool targetFlipped,
+                void AddOrMergeOverlap(int targetBoxIndex, bool sourceFlipped, bool targetFlipped,
                     dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
                 {
-                    var overlap = Dec_CreateOverlap(targetBoxIndex, validFlag, sourceFlipped, targetFlipped, from, to);
+                    var overlap = Dec_CreateOverlap(targetBoxIndex, sourceFlipped, targetFlipped, from, to);
 
                     if (overlapIndexByTarget.TryGetValue(targetBoxIndex, out int existingIdx))
                     {
@@ -621,114 +510,21 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     }
                 }
 
-                // ===============================================================================
-                // PASS 1: Check overlaps in UNFLIPPED state
-                // ===============================================================================
-                if (box1.Unflipped)
+                void CheckUniformPass(bool flipped)
                 {
-                    if (dec_flipped)
-                    {
-                        dec_flipped = false;
-                    }
-
-                    j = 0;
-                    do
-                    {
-                        if (i != j)  // Don't check box against itself
-                        {
-                            var box2 = dec_boxes[j];
-
-                            // Only check if box2 also exists in unflipped state
-                            if (box2.Unflipped)
-                            {
-                                if (Dec_CheckOverlap(box1, box2))
-                                {
-                                    AddOrMergeOverlap(j, OverlapFlags.UnflippedValid, false, false, box1, box2);
-                                }
-                            }
-                        }
-
-                        j++;
-                    }
-                    while (j < dec_boxes.Count);
-                }
-
-                // ===============================================================================
-                // PASS 2: Check overlaps in FLIPPED state
-                // ===============================================================================
-                if (box1.Flipped)
-                {
-                    if (!dec_flipped)
-                    {
-                        dec_flipped = true;
-                    }
-
-                    j = 0;
-                    do
-                    {
-                        if (i != j)
-                        {
-                            var box2 = dec_boxes[j];
-
-                            // Only check if box2 also exists in flipped state
-                            if (box2.Flipped)
-                            {
-                                // Always recheck Pass 2: alt geometry can invalidate a Pass 1 overlap.
-                                if (Dec_CheckOverlap(box1, box2))
-                                {
-                                    AddOrMergeOverlap(j, OverlapFlags.FlippedValid, true, true, box1, box2);
-                                }
-                            }
-                        }
-
-                        j++;
-                    }
-                    while (j < dec_boxes.Count);
-                }
-
-                // ===============================================================================
-                // PASS 3: Mixed flip-group seams.
-                // ===============================================================================
-                // Independent flipmaps can be active in different states at runtime. The normal
-                // all-unflipped/all-flipped passes never test pairs such as room A unflipped
-                // against room B flipped, so seam overlaps between those active boxes would be
-                // missing and had to be synthesized by runtime fallback.
-                void CheckMixedPass(bool sourceFlipped, bool targetFlipped, int validFlag)
-                {
-                    int sourceGroup = Dec_GetRoomFlipGroup(box1.Room);
-                    if (sourceGroup < 0)
+                    byte roomState = flipped ? RoomStateFlipped : RoomStateUnflipped;
+                    if ((box1.RoomStateMask & roomState) == 0)
                         return;
 
-                    dec_flipped = sourceFlipped;
+                    dec_flipped = flipped;
                     j = 0;
                     do
                     {
                         if (i != j)
                         {
                             var box2 = dec_boxes[j];
-                            int targetGroup = Dec_GetRoomFlipGroup(box2.Room);
-                            if (targetGroup >= 0 &&
-                                targetGroup != sourceGroup)
-                            {
-                                var oldOverrides = dec_flipGroupOverrides;
-                                dec_flipGroupOverrides = new Dictionary<int, bool>
-                                {
-                                    [sourceGroup] = sourceFlipped,
-                                    [targetGroup] = targetFlipped
-                                };
-
-                                try
-                                {
-                                    if (Dec_BoxExistsForCurrentStates(box1) &&
-                                        Dec_BoxExistsForCurrentStates(box2) &&
-                                        Dec_CheckOverlap(box1, box2))
-                                        AddOrMergeOverlap(j, validFlag, sourceFlipped, targetFlipped, box1, box2);
-                                }
-                                finally
-                                {
-                                    dec_flipGroupOverrides = oldOverrides;
-                                }
-                            }
+                            if ((box2.RoomStateMask & roomState) != 0 && Dec_CheckOverlap(box1, box2))
+                                AddOrMergeOverlap(j, flipped, flipped, box1, box2);
                         }
 
                         j++;
@@ -736,8 +532,56 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     while (j < dec_boxes.Count);
                 }
 
-                CheckMixedPass(false, true, OverlapFlags.UnflippedValid);
-                CheckMixedPass(true, false, OverlapFlags.FlippedValid);
+                CheckUniformPass(false);
+                CheckUniformPass(true);
+
+                // Mixed flip-group seams.
+                // Independent flipmaps can be active in different states at runtime. The normal
+                // all-unflipped/all-flipped passes never test pairs such as room A unflipped
+                // against room B flipped. Test both mixed combinations explicitly.
+                int mixedSourceGroup = Dec_GetRoomFlipGroup(box1.Room);
+                if (mixedSourceGroup >= 0)
+                {
+                    var oldOverrides = dec_flipGroupOverrides;
+                    dec_flipGroupOverrides = mixedOverrides;
+
+                    try
+                    {
+                        for (int mixedState = 0; mixedState < 2; mixedState++)
+                        {
+                            bool sourceFlipped = mixedState != 0;
+                            bool targetFlipped = !sourceFlipped;
+                            dec_flipped = sourceFlipped;
+                            j = 0;
+                            do
+                            {
+                                if (i != j)
+                                {
+                                    var box2 = dec_boxes[j];
+                                    int targetGroup = Dec_GetRoomFlipGroup(box2.Room);
+                                    if (targetGroup >= 0 && targetGroup != mixedSourceGroup)
+                                    {
+                                        mixedOverrides.Clear();
+                                        mixedOverrides[mixedSourceGroup] = sourceFlipped;
+                                        mixedOverrides[targetGroup] = targetFlipped;
+
+                                        if (Dec_BoxExistsForCurrentStates(box1) &&
+                                            Dec_BoxExistsForCurrentStates(box2) &&
+                                            Dec_CheckOverlap(box1, box2))
+                                            AddOrMergeOverlap(j, sourceFlipped, targetFlipped, box1, box2);
+                                    }
+                                }
+
+                                j++;
+                            }
+                            while (j < dec_boxes.Count);
+                        }
+                    }
+                    finally
+                    {
+                        dec_flipGroupOverrides = oldOverrides;
+                    }
+                }
 
                 i++;
 
@@ -752,18 +596,18 @@ namespace TombLib.LevelData.Compilers.TombEngine
             return true;
         }
 
-        private TombEngineOverlap Dec_CreateOverlap(int box, int validFlag, bool sourceFlipped, bool targetFlipped,
+        private TombEngineOverlap Dec_CreateOverlap(int box, bool sourceFlipped, bool targetFlipped,
             dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
         {
             var overlap = new TombEngineOverlap
             {
                 Box = box,
-                Flags = validFlag
+                Flags = 0
             };
 
             int sourceGroup = Dec_GetRoomFlipGroup(from.Room);
             int targetGroup = Dec_GetRoomFlipGroup(to.Room);
-            if (sourceGroup != targetGroup && (sourceGroup >= 0 || targetGroup >= 0))
+            if (sourceGroup >= 0 || targetGroup >= 0)
             {
                 bool sourceState = sourceGroup >= 0 && sourceFlipped;
                 bool targetState = targetGroup >= 0 && targetFlipped;
@@ -791,28 +635,11 @@ namespace TombLib.LevelData.Compilers.TombEngine
             if (dec_routeExitFloorHint)
                 overlap.Flags |= OverlapFlags.RouteExitFloorHint;
 
-            bool bothWater = (from.Water && to.Water) || (from.Shallow && to.Shallow);
-            if (bothWater || Math.Abs(from.Height - to.Height) <= Clicks.ToWorld(1))
+            bool bothAquatic = (from.Water || from.Shallow) && (to.Water || to.Shallow);
+            if (bothAquatic || Math.Abs(from.Height - to.Height) <= Clicks.ToWorld(1))
                 overlap.Flags |= OverlapFlags.AmphibiousTraversable;
 
             return overlap;
-        }
-
-        private static bool Dec_IsOverlapValidForStates(int flags, bool sourceFlipped, bool targetFlipped)
-        {
-            if ((flags & OverlapFlags.PairStateValidity) != 0)
-            {
-                int state = (sourceFlipped ? 2 : 0) | (targetFlipped ? 1 : 0);
-                int stateMask = flags & OverlapFlags.PairStateMask;
-                return (stateMask & (1 << (OverlapFlags.PairStateMaskShift + state))) != 0;
-            }
-
-            int validMask = OverlapFlags.UnflippedValid | OverlapFlags.FlippedValid;
-            if ((flags & validMask) == 0)
-                return true;
-
-            int validBit = sourceFlipped ? OverlapFlags.FlippedValid : OverlapFlags.UnflippedValid;
-            return (flags & validBit) != 0;
         }
 
         private static int Dec_GetRoomFlipGroup(Room room)
@@ -831,9 +658,11 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
             int group = Dec_GetRoomFlipGroup(box.SectorRoom);
             if (group < 0)
-                return box.Unflipped || box.Flipped;
+                return box.RoomStateMask != 0;
 
-            return Dec_IsRoomFlippedForOverlap(box.SectorRoom) ? box.Flipped : box.Unflipped;
+            byte roomState = Dec_IsRoomFlippedForOverlap(box.SectorRoom) ?
+                RoomStateFlipped : RoomStateUnflipped;
+            return (box.RoomStateMask & roomState) != 0;
         }
 
         private static bool Dec_CanShareBoxIdentity(dec_TombEngine_box_aux first, dec_TombEngine_box_aux second)
@@ -844,7 +673,6 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 first.SectorRoom == second.SectorRoom;
 
             return compatibleRooms &&
-                first.Environment == second.Environment &&
                 first.FloorFlipDependencyGroup == second.FloorFlipDependencyGroup &&
                 first.FloorFlipDependencyState == second.FloorFlipDependencyState &&
                 first.FloorFlipCounterpartSignature == second.FloorFlipCounterpartSignature;
@@ -866,32 +694,9 @@ namespace TombLib.LevelData.Compilers.TombEngine
             return Dec_IsFlipGroupFlippedForOverlap(group);
         }
 
-        private Room Dec_GetAdjoiningRoomForFlipPass(Room currentRoom, Room adjoiningRoom)
-        {
-            if (!Dec_IsRoomFlippedForOverlap(adjoiningRoom) || adjoiningRoom?.AlternateRoom == null)
-                return adjoiningRoom;
-
-            return adjoiningRoom.AlternateRoom;
-        }
-
-        private TombEngineBoxEnvironment Dec_GetBoxEnvironment()
-        {
-            if (dec_lastShallowWater)
-                return TombEngineBoxEnvironment.ShallowWater;
-
-            if (dec_room.Properties.Type == RoomType.Water)
-                return TombEngineBoxEnvironment.Water;
-
-            if (dec_room.Properties.Type == RoomType.Quicksand)
-                return TombEngineBoxEnvironment.Quicksand;
-
-            return TombEngineBoxEnvironment.Dry;
-        }
-
         private bool Dec_BoxFloorMatches(int x, int z, int floor, int dependencyGroup, byte dependencyState)
         {
             return Dec_GetHeight(x, z) == floor &&
-                Dec_GetBoxEnvironment() == dec_boxEnvironment &&
                 dec_floorFlipDependencyGroup == dependencyGroup &&
                 dec_floorFlipDependencyState == dependencyState &&
                 dec_floorFlipCounterpartSignature == dec_boxFloorCounterpartSignature &&
@@ -900,101 +705,43 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
         private int Dec_FindBox(dec_TombEngine_box_aux box)
         {
+            var searchBounds = Vector128.Create(box.Xmin, box.Xmax, box.Zmin, box.Zmax);
             for (int i = 0; i < dec_boxes.Count; i++)
             {
                 var candidate = dec_boxes[i];
-                if (candidate.Xmin == box.Xmin &&
-                    candidate.Xmax == box.Xmax &&
-                    candidate.Zmin == box.Zmin &&
-                    candidate.Zmax == box.Zmax &&
+                bool sameBounds;
+                if (Sse2.IsSupported)
+                {
+                    var candidateBounds = Vector128.Create(candidate.Xmin, candidate.Xmax, candidate.Zmin, candidate.Zmax);
+                    sameBounds = Sse2.MoveMask(Sse2.CompareEqual(searchBounds, candidateBounds).AsByte()) == 0xFFFF;
+                }
+                else
+                {
+                    sameBounds =
+                        candidate.Xmin == box.Xmin && candidate.Xmax == box.Xmax &&
+                        candidate.Zmin == box.Zmin && candidate.Zmax == box.Zmax;
+                }
+
+                if (sameBounds &&
                     candidate.Height == box.Height &&
                     Dec_CanShareBoxIdentity(candidate, box))
-                {
                     return i;
-                }
             }
 
             return -1;
         }
 
         /// <summary>
-        /// Adds a box to the box list, with deduplication.
-        ///
-        /// DEDUPLICATION:
-        /// ==============
-        /// Boxes are considered duplicates if they have identical:
-        /// - Bounds (Xmin, Xmax, Zmin, Zmax)
-        /// - Height
-        /// - Water flag
-        ///
-        /// This is critical because the same floor area may be processed multiple times
-        /// (from different starting sectors, or during flip state passes).
-        ///
-        /// SIMD OPTIMIZATION:
-        /// ==================
-        /// Uses SSE2 SIMD instructions when available to compare multiple values
-        /// simultaneously, significantly speeding up the search for duplicates.
-        ///
-        /// FLIP STATE HANDLING:
-        /// ====================
-        /// When a duplicate is found during the flipped pass (dec_flipped=true),
-        /// the existing box is marked as Flipped, indicating it exists in both states.
+        /// Adds a box and optionally merges its room-state and environment flags into
+        /// an existing box with the same bounds, height and compiled identity.
         /// </summary>
         /// <param name="box">Box to add</param>
+        /// <param name="mergeExisting">Whether an existing box should absorb flags from this sample</param>
         /// <returns>Index of the box (new or existing duplicate)</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
-        private int Dec_AddBox(dec_TombEngine_box_aux box)
+        private int Dec_AddBox(dec_TombEngine_box_aux box, bool mergeExisting = true)
         {
-            int boxIndex = -1;
-
-            // ===================================================================================
-            // SIMD-ACCELERATED DUPLICATE SEARCH
-            // ===================================================================================
-            if (Sse2.IsSupported)
-            {
-                // Pack search criteria into 128-bit vectors (4 x 32-bit integers)
-                var searchBounds = Vector128.Create(box.Xmin, box.Xmax, box.Zmin, box.Zmax);
-
-                for (int i = 0; i < dec_boxes.Count; i++)
-                {
-                    var candidate = dec_boxes[i];
-
-                    // Pack candidate values
-                    var candBounds = Vector128.Create(candidate.Xmin, candidate.Xmax, candidate.Zmin, candidate.Zmax);
-
-                    // Compare all 4 bounds simultaneously and extract comparison results as bitmasks
-                    var cmpBounds = Sse2.CompareEqual(searchBounds, candBounds);
-                    int maskBounds = Sse2.MoveMask(cmpBounds.AsByte());
-
-                    // All 4 bounds must match (0xFFFF = all 16 bytes equal)
-                    if (maskBounds == 0xFFFF &&
-                        candidate.Height == box.Height &&
-                        Dec_CanShareBoxIdentity(candidate, box))
-                    {
-                        boxIndex = i;
-                        break;
-                    }
-                }
-            }
-            else
-            {
-                // ===================================================================================
-                // SCALAR FALLBACK (non-SSE2 systems)
-                // ===================================================================================
-                for (int i = 0; i < dec_boxes.Count; i++)
-                {
-                    if (dec_boxes[i].Xmin == box.Xmin &&
-                        dec_boxes[i].Xmax == box.Xmax &&
-                        dec_boxes[i].Zmin == box.Zmin &&
-                        dec_boxes[i].Zmax == box.Zmax &&
-                        dec_boxes[i].Height == box.Height &&
-                        Dec_CanShareBoxIdentity(dec_boxes[i], box))
-                    {
-                        boxIndex = i;
-                        break;
-                    }
-                }
-            }
+            int boxIndex = Dec_FindBox(box);
 
             // ===================================================================================
             // ADD OR UPDATE BOX
@@ -1006,7 +753,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 box.OverlapIndex = -1;
                 dec_boxes.Add(box);
             }
-            else
+            else if (mergeExisting)
             {
                 // A sector-local duplicate may first be discovered through an adjoining
                 // flip group. Prefer the sample rooted in the sector's own group so mixed
@@ -1019,13 +766,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 if (box.Water || box.Shallow || preferSectorRoom)
                     dec_boxes[boxIndex].Room = box.Room;
 
-                // Duplicate found - merge state flags from BOTH passes. Unflipped must be
-                // merged too: a box first created in the flipped pass (Flipped only) that is
-                // later re-created in the base pass has to accumulate Unflipped, otherwise it
-                // stays flip-only and the runtime treats it as non-existent in the base state,
-                // breaking connectivity at boundaries with non-alternated ('none') rooms.
-                dec_boxes[boxIndex].Unflipped |= box.Unflipped;
-                dec_boxes[boxIndex].Flipped   |= box.Flipped;
+                // Preserve every room state in which this compiled identity was found.
+                dec_boxes[boxIndex].RoomStateMask |= box.RoomStateMask;
                 dec_boxes[boxIndex].Water      |= box.Water;
                 dec_boxes[boxIndex].Shallow    |= box.Shallow;
             }
@@ -1121,7 +863,6 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // ===================================================================================
             bool slope;
             int floor = Dec_GetHeight(currentX, currentZ, out slope);
-            dec_boxEnvironment = Dec_GetBoxEnvironment();
             int floorDependencyGroup = dec_floorFlipDependencyGroup;
             byte floorDependencyState = dec_floorFlipDependencyState;
             dec_boxFloorCounterpartSignature = dec_floorFlipCounterpartSignature;
@@ -1140,19 +881,18 @@ namespace TombLib.LevelData.Compilers.TombEngine
             box.SectorRoom = theRoom;
             box.Water = dec_room.Properties.Type == RoomType.Water;
 
-            // Non-alternated rooms exist in both passes, so they can connect to flipped neighbours.
+            // Non-alternated rooms exist in both runtime states.
             if (!theRoom.Alternated)
             {
-                box.Unflipped = true;
-                box.Flipped = true;
+                box.RoomStateMask = RoomStateUnflipped | RoomStateFlipped;
             }
             else if (dec_flipped)
             {
-                box.Flipped = true;
+                box.RoomStateMask = RoomStateFlipped;
             }
             else
             {
-                box.Unflipped = true;
+                box.RoomStateMask = RoomStateUnflipped;
             }
 
             // Record initial monkey swing state
@@ -1169,7 +909,6 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 box.Water = false;
             }
             box.Shallow = dec_shallowWater;
-            box.Environment = dec_boxEnvironment;
 
             // ===================================================================================
             // SPLITTER BOX - Single sector box
@@ -1547,7 +1286,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 // sectors across wall portals, producing wrong heights and overlaps tagged
                 // 'both' at the junction between flip-changed and unchanged geometry.
                 Room adjoiningRoom = sector.WallPortal.AdjoiningRoom;
-                adjoiningRoom = Dec_GetAdjoiningRoomForFlipPass(room, adjoiningRoom);
+                adjoiningRoom = Dec_GetRoomForFlipPass(adjoiningRoom);
 
                 dec_room = adjoiningRoom;
                 room = adjoiningRoom;
@@ -1576,7 +1315,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             while (room.GetFloorRoomConnectionInfo(new VectorInt2(localX, localZ), true).TraversableType == Room.RoomConnectionType.FullPortal)
             {
                 Room adjoiningRoom = sector.FloorPortal.AdjoiningRoom;
-                adjoiningRoom = Dec_GetAdjoiningRoomForFlipPass(room, adjoiningRoom);
+                adjoiningRoom = Dec_GetRoomForFlipPass(adjoiningRoom);
 
                 // Stop at water boundary (don't cross water/land transition via floor portals)
                 if (room.Properties.Type == RoomType.Water != (adjoiningRoom.Properties.Type == RoomType.Water))
@@ -1683,7 +1422,6 @@ namespace TombLib.LevelData.Compilers.TombEngine
         private int Dec_GetHeight(int x, int z, out bool slope)
         {
             slope = false;
-            dec_lastShallowWater = false;
             dec_floorFlipDependencyGroup = -1;
             dec_floorFlipDependencyState = 0;
             dec_floorFlipCounterpartSignature = int.MinValue;
@@ -1729,7 +1467,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             if (sector.WallPortal is not null && sector.WallPortal.Opacity != PortalOpacity.SolidFaces)
             {
                 adjoiningRoom = sector.WallPortal.AdjoiningRoom;
-                adjoiningRoom = Dec_GetAdjoiningRoomForFlipPass(room, adjoiningRoom);
+                adjoiningRoom = Dec_GetRoomForFlipPass(adjoiningRoom);
                 dec_room = adjoiningRoom;
                 dec_doorCheck = true;
 
@@ -1752,18 +1490,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             while (sector.FloorPortal != null && connInfo.TraversableType != Room.RoomConnectionType.NoPortal)
             {
                 adjoiningRoom = sector.FloorPortal.AdjoiningRoom;
-                adjoiningRoom = Dec_GetAdjoiningRoomForFlipPass(room, adjoiningRoom);
-
-                // Keep the box on its own side of a liquid boundary. A dry room
-                // above water must retain its platform height instead of inheriting
-                // the floor height from the room below.
-                bool roomIsLiquid = room.Properties.Type == RoomType.Water ||
-                    room.Properties.Type == RoomType.Quicksand;
-                bool adjoiningRoomIsLiquid = adjoiningRoom.Properties.Type == RoomType.Water ||
-                    adjoiningRoom.Properties.Type == RoomType.Quicksand;
-                if (roomIsLiquid != adjoiningRoomIsLiquid ||
-                    roomIsLiquid && room.Properties.Type != adjoiningRoom.Properties.Type)
-                    break;
+                adjoiningRoom = Dec_GetRoomForFlipPass(adjoiningRoom);
 
                 if (sector.FloorPortal.Opacity == PortalOpacity.SolidFaces)
                 {
@@ -1843,13 +1570,12 @@ namespace TombLib.LevelData.Compilers.TombEngine
             if (dec_checkUnderwater && room.Properties.Type == RoomType.Water && delta <= Clicks.ToWorld(2) && sector.CeilingPortal != null)
             {
                 adjoiningRoom = sector.CeilingPortal.AdjoiningRoom;
-                adjoiningRoom = Dec_GetAdjoiningRoomForFlipPass(room, adjoiningRoom);
+                adjoiningRoom = Dec_GetRoomForFlipPass(adjoiningRoom);
 
                 if (adjoiningRoom.Properties.Type != RoomType.Water)
                 {
                     dec_checkUnderwater = delta > Clicks.ToWorld(1);
                     dec_shallowWater = true;
-                    dec_lastShallowWater = true;
                 }
             }
 
@@ -2150,9 +1876,14 @@ namespace TombLib.LevelData.Compilers.TombEngine
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         private Room Dec_GetRoomForFlipPass(Room r)
         {
-            if (Dec_IsRoomFlippedForOverlap(r) && r != null && r.AlternateRoom != null)
-                return r.AlternateRoom;
-            return r;
+            if (r == null)
+                return null;
+
+            Room baseRoom = r.AlternateBaseRoom ?? r;
+            if (Dec_IsRoomFlippedForOverlap(baseRoom) && baseRoom.AlternateRoom != null)
+                return baseRoom.AlternateRoom;
+
+            return baseRoom;
         }
 
         private bool Dec_BoxesShareVerticalPortal(dec_TombEngine_box_aux a, dec_TombEngine_box_aux b)
@@ -2214,6 +1945,57 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 return false;
 
             return dec_overlapTraversedVerticalPortal || Dec_BoxesShareVerticalPortal(from, to);
+        }
+
+        private bool Dec_GetFloorCorners(dec_TombEngine_box_aux box, int x, int z, out int[] corners)
+        {
+            corners = null;
+            dec_room = Dec_GetRoomForFlipPass(box.SectorRoom);
+            int height = Dec_GetHeight(x, z);
+            if (height == _noHeight)
+                return false;
+
+            int average = (dec_cornerHeight1 + dec_cornerHeight2 +
+                dec_cornerHeight3 + dec_cornerHeight4) / 4;
+            int roomY = height - average;
+            corners = new[]
+            {
+                dec_cornerHeight1 + roomY,
+                dec_cornerHeight2 + roomY,
+                dec_cornerHeight3 + roomY,
+                dec_cornerHeight4 + roomY
+            };
+            return true;
+        }
+
+        private bool Dec_SharedXEdgeHeightsMatch(dec_TombEngine_box_aux first,
+            dec_TombEngine_box_aux second, int firstX, int secondX,
+            int firstCornerA, int firstCornerB, int secondCornerA, int secondCornerB)
+        {
+            for (int z = Math.Max(first.Zmin, second.Zmin); z < Math.Min(first.Zmax, second.Zmax); z++)
+            {
+                if (!Dec_GetFloorCorners(first, firstX, z, out int[] firstCorners) ||
+                    !Dec_GetFloorCorners(second, secondX, z, out int[] secondCorners) ||
+                    firstCorners[firstCornerA] != secondCorners[secondCornerA] ||
+                    firstCorners[firstCornerB] != secondCorners[secondCornerB])
+                    return false;
+            }
+            return true;
+        }
+
+        private bool Dec_SharedZEdgeHeightsMatch(dec_TombEngine_box_aux first,
+            dec_TombEngine_box_aux second, int firstZ, int secondZ,
+            int firstCornerA, int firstCornerB, int secondCornerA, int secondCornerB)
+        {
+            for (int x = Math.Max(first.Xmin, second.Xmin); x < Math.Min(first.Xmax, second.Xmax); x++)
+            {
+                if (!Dec_GetFloorCorners(first, x, firstZ, out int[] firstCorners) ||
+                    !Dec_GetFloorCorners(second, x, secondZ, out int[] secondCorners) ||
+                    firstCorners[firstCornerA] != secondCorners[secondCornerA] ||
+                    firstCorners[firstCornerB] != secondCorners[secondCornerB])
+                    return false;
+            }
+            return true;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
@@ -2430,13 +2212,17 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 // Check X edge adjacency
                 if (box1.Xmax == box2.Xmin)
                 {
-                    if (!Dec_TestOverlapXmax(box1, box2) &&
+                    bool edgeMatches = Dec_SharedXEdgeHeightsMatch(box1, box2,
+                        box1.Xmax - 1, box1.Xmax, 1, 2, 0, 3);
+                    if (!Dec_TestOverlapXmax(box1, box2) && !edgeMatches &&
                         (box1.Height != box2.Height || !Dec_TestOverlapXmin(box2, box1)))
                         return false;
                 }
                 else if (box1.Xmin == box2.Xmax)
                 {
-                    if (!Dec_TestOverlapXmin(box1, box2) &&
+                    bool edgeMatches = Dec_SharedXEdgeHeightsMatch(box1, box2,
+                        box1.Xmin, box1.Xmin - 1, 0, 3, 1, 2);
+                    if (!Dec_TestOverlapXmin(box1, box2) && !edgeMatches &&
                         (box1.Height != box2.Height || !Dec_TestOverlapXmax(box2, box1)))
                         return false;
                 }
@@ -2485,13 +2271,17 @@ namespace TombLib.LevelData.Compilers.TombEngine
             // Check Z edge adjacency
             if (box1.Zmax == box2.Zmin)
             {
-                if (!Dec_TestOverlapZmax(box1, box2) &&
+                bool edgeMatches = Dec_SharedZEdgeHeightsMatch(box1, box2,
+                    box1.Zmax - 1, box1.Zmax, 0, 1, 3, 2);
+                if (!Dec_TestOverlapZmax(box1, box2) && !edgeMatches &&
                     (box1.Height != box2.Height || !Dec_TestOverlapZmin(box2, box1)))
                     return false;
             }
             else if (box1.Zmin == box2.Zmax)
             {
-                if (!Dec_TestOverlapZmin(box1, box2) &&
+                bool edgeMatches = Dec_SharedZEdgeHeightsMatch(box1, box2,
+                    box1.Zmin, box1.Zmin - 1, 3, 2, 0, 1);
+                if (!Dec_TestOverlapZmin(box1, box2) && !edgeMatches &&
                     (box1.Height != box2.Height || !Dec_TestOverlapZmax(box2, box1)))
                     return false;
             }

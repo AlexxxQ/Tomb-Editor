@@ -22,6 +22,9 @@ namespace TombLib.LevelData.Compilers.TombEngine
         private Dictionary<ShadeMatchSignature, Vector3> _vertexColors;
 		private Dictionary<Vector3, List<(TombEngineRoom room, int vertexIndex, NormalHelper poly)>> _normalGroups;
         private Dictionary<Room, VectorInt2> _roomsMinFloorMaxCeilingCache = new Dictionary<Room, VectorInt2>();
+
+        private int GetRuntimeRoomNumber(Room room) =>
+            _roomRemapping[room.AlternateBaseRoom ?? room];
         
 		private void BuildRooms(CancellationToken cancelToken)
         {

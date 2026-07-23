@@ -65,7 +65,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
                                         if (adjoiningSector != null)
                                         {
-                                            compiledSector.CeilingCollision.Portals[0] = _roomRemapping[adjoiningRoom];
+                                            compiledSector.CeilingCollision.Portals[0] = GetRuntimeRoomNumber(adjoiningRoom);
                                             compiledSector.CeilingCollision.Portals[1] = compiledSector.CeilingCollision.Portals[0];
                                             ceilingPortalAssigned = true;
                                         }
@@ -88,7 +88,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
                                             if (adjoiningSector != null && (adjoiningSector.Type != SectorType.BorderWall || adjoiningSector.WallPortal != null && adjoiningSector.WallPortal.Opacity != PortalOpacity.SolidFaces))
                                             {
-                                                compiledSector.WallPortal = _roomRemapping[adjoiningRoom];
+                                                compiledSector.WallPortal = GetRuntimeRoomNumber(adjoiningRoom);
                                                 break;
                                             }
                                         }
@@ -97,7 +97,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                             }
                             else
                             {
-                                compiledSector.WallPortal = _roomRemapping[sector.WallPortal.AdjoiningRoom];
+                                compiledSector.WallPortal = GetRuntimeRoomNumber(sector.WallPortal.AdjoiningRoom);
                             }
 
                             compiledSector.FloorCollision.Planes[0].Z = -room.Position.Y;
@@ -509,14 +509,14 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     if (shape.SplitWallFirst)
                     {
                         if (portal != null)
-                            newCollision.Portals[0] = _roomRemapping[portal.AdjoiningRoom];
+                            newCollision.Portals[0] = GetRuntimeRoomNumber(portal.AdjoiningRoom);
 
                         newCollision.Planes[0].Z = -float.MaxValue;
                     }
                     else
                     {
                         if (shape.SplitPortalFirst)
-                            newCollision.Portals[0] = _roomRemapping[portal.AdjoiningRoom];
+                            newCollision.Portals[0] = GetRuntimeRoomNumber(portal.AdjoiningRoom);
 
                         newCollision.Planes[0] = GetPlane(
                                 new Vector3(-Level.HalfSectorSizeUnit, -reportRoom.Position.Y - shape.HeightXnZp, Level.HalfSectorSizeUnit),
@@ -528,14 +528,14 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     if (shape.SplitWallSecond)
                     {
                         if (portal != null)
-                            newCollision.Portals[1] = _roomRemapping[portal.AdjoiningRoom];
+                            newCollision.Portals[1] = GetRuntimeRoomNumber(portal.AdjoiningRoom);
 
                         newCollision.Planes[1].Z = -float.MaxValue;
                     }
                     else
                     {
                         if (shape.SplitPortalSecond)
-                            newCollision.Portals[1] = _roomRemapping[portal.AdjoiningRoom];
+                            newCollision.Portals[1] = GetRuntimeRoomNumber(portal.AdjoiningRoom);
 
                         newCollision.Planes[1] = GetPlane(
                             new Vector3(Level.HalfSectorSizeUnit, -reportRoom.Position.Y - shape.HeightXpZn, -Level.HalfSectorSizeUnit),
@@ -551,14 +551,14 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     if (shape.SplitWallSecond)
                     {
                         if (portal != null)
-                            newCollision.Portals[0] = _roomRemapping[portal.AdjoiningRoom];
+                            newCollision.Portals[0] = GetRuntimeRoomNumber(portal.AdjoiningRoom);
 
                         newCollision.Planes[0].Z = -float.MaxValue;
                     }
                     else
                     {
                         if (shape.SplitPortalSecond)
-                            newCollision.Portals[0] = _roomRemapping[portal.AdjoiningRoom];
+                            newCollision.Portals[0] = GetRuntimeRoomNumber(portal.AdjoiningRoom);
 
                         newCollision.Planes[0] = GetPlane(
                             new Vector3(Level.HalfSectorSizeUnit, -reportRoom.Position.Y - shape.HeightXpZp, Level.HalfSectorSizeUnit),
@@ -569,14 +569,14 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     if (shape.SplitWallFirst)
                     {
                         if (portal != null)
-                            newCollision.Portals[1] = _roomRemapping[portal.AdjoiningRoom];
+                            newCollision.Portals[1] = GetRuntimeRoomNumber(portal.AdjoiningRoom);
 
                         newCollision.Planes[1].Z = -float.MaxValue;
                     }
                     else
                     {
                         if (shape.SplitPortalFirst)
-                            newCollision.Portals[1] = _roomRemapping[portal.AdjoiningRoom];
+                            newCollision.Portals[1] = GetRuntimeRoomNumber(portal.AdjoiningRoom);
 
                         newCollision.Planes[1] = GetPlane(
                           new Vector3(-Level.HalfSectorSizeUnit, -reportRoom.Position.Y - shape.HeightXnZn, -Level.HalfSectorSizeUnit),
@@ -590,7 +590,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             {
                 if (shape.SplitPortalFirst && shape.SplitPortalSecond)
                 {
-                    newCollision.Portals[0] = _roomRemapping[portal.AdjoiningRoom];
+                    newCollision.Portals[0] = GetRuntimeRoomNumber(portal.AdjoiningRoom);
                     newCollision.Portals[1] = newCollision.Portals[0];
                 }
 

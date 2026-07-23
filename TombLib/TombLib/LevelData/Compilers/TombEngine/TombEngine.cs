@@ -236,33 +236,17 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 writer.Write(_overlaps.Count);
                 writer.WriteBlockArray(_overlaps);
 
-                int zoneCount = Enum.GetValues(typeof(ZoneType)).Length;
-                writer.Write(zoneCount);
-
-                foreach (int flipped in new[] { 0, 1 })
-                    for (int i = 0; i < zoneCount; i++)
-                        _zones.ForEach(z => writer.Write(z.Zones[flipped][i]));
-
-                // Sparse sector box variants selected from live flip-group states.
-                writer.Write(0x31564253); // "SBV1"
+                // Dense sector box variants indexed by the local flip-group state mask.
+                writer.Write(0x32564253); // "SBV2"
                 writer.Write(_sectorBoxVariants.Count);
                 foreach (var sectorVariants in _sectorBoxVariants)
                 {
                     writer.Write(sectorVariants.Room);
                     writer.Write(sectorVariants.Sector);
-                    writer.Write(sectorVariants.DefaultBox);
-                    writer.Write(sectorVariants.Cases.Count);
-
-                    foreach (var boxCase in sectorVariants.Cases)
-                    {
-                        writer.Write(boxCase.Box);
-                        writer.Write(boxCase.Conditions.Count);
-                        foreach (var condition in boxCase.Conditions)
-                        {
-                            writer.Write(condition.Group);
-                            writer.Write(condition.Flipped);
-                        }
-                    }
+                    writer.Write(sectorVariants.Groups.Count);
+                    sectorVariants.Groups.ForEach(writer.Write);
+                    writer.Write(sectorVariants.Boxes.Count);
+                    sectorVariants.Boxes.ForEach(writer.Write);
                 }
 
                 // Write mirrors
