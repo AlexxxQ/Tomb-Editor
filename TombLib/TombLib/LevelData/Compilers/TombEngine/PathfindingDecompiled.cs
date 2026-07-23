@@ -110,8 +110,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
         public class OverlapFlags
         {
             public const int RouteExitFloorHint = 0x0004;
-            // Independent flip-group conditions are packed into otherwise unused overlap bits.
-            // Groups are stored per edge because one box ID may be shared by several rooms.
+            // Per-edge flip-group conditions use otherwise unused overlap bits.
             public const int PairStateMaskShift = 3;
             public const int PairStateMask = 0x0078;
             public const int PairStateValidity = 0x0080;
@@ -168,9 +167,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
         /// </summary>
         private bool dec_flipped;
 
-        /// <summary>
-        /// Optional per-flip-group state override for mixed flipmap overlap checks.
-        /// </summary>
+        // Group-state overrides for mixed flipmap checks.
         private Dictionary<int, bool> dec_flipGroupOverrides;
 
         /// <summary>
@@ -179,15 +176,10 @@ namespace TombLib.LevelData.Compilers.TombEngine
         /// </summary>
         private bool dec_jump;
 
-        /// <summary>
-        /// Flag set by Dec_CheckOverlap for accepted height-changing links whose
-        /// destination floor must be resolved from the route exit box at runtime.
-        /// </summary>
+        // Marks links whose runtime floor probe must use the route exit box.
         private bool dec_routeExitFloorHint;
 
-        /// <summary>
-        /// Set while Dec_CheckOverlap samples an edge through a vertical portal.
-        /// </summary>
+        // Set while sampling an edge through a vertical portal.
         private bool dec_overlapTraversedVerticalPortal;
 
         private int dec_boxSourceFlipGroup;
@@ -454,11 +446,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
         ///
         /// FLIP STATE HANDLING:
         /// ====================
-        /// Non-flipped rooms set both bits in RoomStateMask; rooms in a flip pair set
-        /// only the bit for the state in which their geometry exists.
-        ///
-        /// The compiler checks all-off, all-on and both mixed states for independent groups.
-        /// Results involving any flip group are merged into a four-bit state mask.
+        /// RoomStateMask records valid geometry states; independent pairs also test both mixed states.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         private bool Dec_BuildOverlaps()
@@ -483,9 +471,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
                 int numOverlapsAdded = 0;
 
-                // Track entries by target box so later passes can merge flags into the
-                // existing entry instead of adding duplicates.
-                // Key = j (target box index), Value = index into dec_overlaps.
+                // Merge repeated target-box entries across state passes.
                 overlapIndexByTarget.Clear();
 
                 void AddOrMergeOverlap(int targetBoxIndex, bool sourceFlipped, bool targetFlipped,
@@ -535,10 +521,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 CheckUniformPass(false);
                 CheckUniformPass(true);
 
-                // Mixed flip-group seams.
-                // Independent flipmaps can be active in different states at runtime. The normal
-                // all-unflipped/all-flipped passes never test pairs such as room A unflipped
-                // against room B flipped. Test both mixed combinations explicitly.
+                // Uniform passes miss seams between independent groups; test both mixed states.
                 int mixedSourceGroup = Dec_GetRoomFlipGroup(box1.Room);
                 if (mixedSourceGroup >= 0)
                 {
@@ -731,13 +714,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             return -1;
         }
 
-        /// <summary>
-        /// Adds a box and optionally merges its room-state and environment flags into
-        /// an existing box with the same bounds, height and compiled identity.
-        /// </summary>
-        /// <param name="box">Box to add</param>
-        /// <param name="mergeExisting">Whether an existing box should absorb flags from this sample</param>
-        /// <returns>Index of the box (new or existing duplicate)</returns>
+        // Adds a box or merges matching compiled identity flags.
         [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
         private int Dec_AddBox(dec_TombEngine_box_aux box, bool mergeExisting = true)
         {
@@ -755,9 +732,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
             }
             else if (mergeExisting)
             {
-                // A sector-local duplicate may first be discovered through an adjoining
-                // flip group. Prefer the sample rooted in the sector's own group so mixed
-                // overlap checks retain the sector side of the vertical portal.
+                // Prefer the sector's own flip group when a duplicate spans a portal.
                 bool preferSectorRoom =
                     box.SectorRoom == dec_boxes[boxIndex].SectorRoom &&
                     Dec_GetRoomFlipGroup(box.Room) >= 0 &&
@@ -1279,12 +1254,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 if (sector.WallPortal == null)
                     break;
 
-                // Follow wall portal to adjoining room. When processing the flipped pass
-                // and the adjoining room is itself alternated, descend into its alternate
-                // so geometry sampled across the portal matches the flip state we're
-                // currently building. Without this, the alt pass silently reads base-room
-                // sectors across wall portals, producing wrong heights and overlaps tagged
-                // 'both' at the junction between flip-changed and unchanged geometry.
+                // Sample the adjoining room in the current flip pass.
                 Room adjoiningRoom = sector.WallPortal.AdjoiningRoom;
                 adjoiningRoom = Dec_GetRoomForFlipPass(adjoiningRoom);
 
@@ -1939,8 +1909,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
         private bool Dec_NeedsGroundRouteExitFloorHint(dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
         {
             int heightDiff = Math.Abs(from.Height - to.Height);
-            // Runtime consumes this only for ground creatures' floor probe retry;
-            // water/flyer traversal is still governed by normal LOT Step/Drop.
+            // Only ground route-exit floor retries consume this hint.
             if (heightDiff > Clicks.ToWorld(4))
                 return false;
 
