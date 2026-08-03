@@ -545,6 +545,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
     {
         public int Box;
         public int Flags;
+        public int HeightDelta;
     }
 
     public class TombEngineSectorBoxVariants
