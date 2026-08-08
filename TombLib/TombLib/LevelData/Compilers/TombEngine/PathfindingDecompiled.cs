@@ -2059,6 +2059,34 @@ namespace TombLib.LevelData.Compilers.TombEngine
             return false;
         }
 
+        private bool Dec_BoxEdgeHasVerticalPortal(dec_TombEngine_box_aux box, dec_TombEngine_box_aux other)
+        {
+            bool HasPortal(int x, int z) =>
+                Dec_BoxOwnsActiveSector(box, x, z) && dec_verticalPortalSignature != 0;
+
+            if (box.Xmin == other.Xmax || box.Xmax == other.Xmin)
+            {
+                int x = box.Xmin == other.Xmax ? box.Xmin : box.Xmax - 1;
+                for (int z = Math.Max(box.Zmin, other.Zmin); z < Math.Min(box.Zmax, other.Zmax); z++)
+                {
+                    if (HasPortal(x, z))
+                        return true;
+                }
+            }
+
+            if (box.Zmin == other.Zmax || box.Zmax == other.Zmin)
+            {
+                int z = box.Zmin == other.Zmax ? box.Zmin : box.Zmax - 1;
+                for (int x = Math.Max(box.Xmin, other.Xmin); x < Math.Min(box.Xmax, other.Xmax); x++)
+                {
+                    if (HasPortal(x, z))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
         private bool Dec_NeedsGroundRouteExitFloorHint(dec_TombEngine_box_aux from, dec_TombEngine_box_aux to)
         {
             int heightDiff = Math.Abs(Dec_GetOverlapHeightDelta(from, to));
@@ -2067,7 +2095,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 return false;
 
             return dec_overlapTraversedVerticalPortal ||
-                to.VerticalPortalSignature != 0 ||
+                Dec_BoxEdgeHasVerticalPortal(to, from) ||
                 Dec_BoxesShareVerticalPortal(from, to);
         }
 
