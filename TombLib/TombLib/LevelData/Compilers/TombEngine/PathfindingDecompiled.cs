@@ -446,9 +446,13 @@ namespace TombLib.LevelData.Compilers.TombEngine
         /// to the start of its overlap list. The list ends when END_BIT (0x8000) is set.
         ///
         /// OVERLAP FLAGS:
-        /// - 0x0800 (JUMP_BIT): Connection requires jumping across a gap
-        /// - 0x2000 (MONKEY_BIT): Connection uses monkey swing ceiling
-        /// - 0x8000 (END_BIT): Last overlap in this box's list
+        /// - FLYER_ONLY: Edge exists only through shared air space.
+        /// - ROUTE_EXIT_FLOOR_HINT: Ground collision must probe the compiled route exit floor.
+        /// - PAIR_STATE: Edge validity for the source/target flip-group combination.
+        /// - JUMP, MONKEY: Edge requires the corresponding movement capability.
+        /// - SHALLOW_WATER_LOW_EDGE: Preferred water-to-shallow transition.
+        /// - AMPHIBIOUS_TRAVERSABLE: Edge is valid for amphibious LOT.
+        /// - END: Last overlap in this box's list.
         ///
         /// FLIP STATE HANDLING:
         /// ====================
