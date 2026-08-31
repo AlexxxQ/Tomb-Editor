@@ -68,6 +68,85 @@ LevelFuncs.Engine.Node.SetCreatureTarget = function(moveable, target, retaliate)
     movAI:SetTarget(targetMov)
 end
 
+-- !Name "Set creature alerted state"
+-- !Section "Creature AI"
+-- !Description "Sets or clears the alerted state of an active creature."
+-- !Arguments "Newline, Moveables, 70, Creature to update."
+-- !Arguments "Boolean, 30, {true}, Alerted"
+LevelFuncs.Engine.Node.SetCreatureAlerted = function(moveable, alerted)
+    local mov = LevelFuncs.Engine.Node.RequireActiveMoveable(moveable, "setting alerted state")
+    if not mov then return end
+
+    Objects.Creature(mov):SetAlerted(alerted)
+end
+
+-- !Name "If Lara is detected by enemy..."
+-- !Section "Creature AI"
+-- !Description "Detects Lara when her head or torso is visible in the creature's front 180-degree view, regardless of silent walk. Behind the creature, only running or sprinting is detected; silent walk remains unnoticed."
+-- !Conditional "True"
+-- !Arguments "Newline, Moveables, 100, Creature trying to detect Lara."
+LevelFuncs.Engine.Node.TestLaraDetectedByEnemy = function(moveable)
+    local enemy = LevelFuncs.Engine.Node.RequireActiveMoveable(moveable, "checking Lara detection", true)
+    if not enemy or enemy:GetHP() <= 0 or Lara:GetHP() <= 0 then return false end
+
+    local enemyPosition = enemy:GetPosition()
+    local laraPosition = Lara:GetPosition()
+    local deltaX = laraPosition.x - enemyPosition.x
+    local deltaZ = laraPosition.z - enemyPosition.z
+    local distance = math.sqrt(deltaX * deltaX + deltaZ * deltaZ)
+
+    local isAhead = true
+    if distance > 0 then
+        local yaw = math.rad(enemy:GetRotation().y)
+        local forwardX = math.sin(yaw)
+        local forwardZ = math.cos(yaw)
+        isAhead = (forwardX * deltaX + forwardZ * deltaZ) / distance > 0
+    end
+
+    local function hasClearSight(origin, target)
+        local sightVector = target - origin
+        local sightDistance = sightVector:Length()
+        if sightDistance <= 0 then return true end
+
+        local ray = TEN.Collision.Ray(
+            origin,
+            enemy:GetRoomNumber(),
+            sightVector:Normalize(),
+            sightDistance,
+            TEN.Collision.IntersectionType.NONE,
+            TEN.Collision.IntersectionType.BOX)
+
+        return not ray:HitRoom() and not ray:HitStatic()
+    end
+
+    local eyePosition = enemyPosition
+    for jointIndex = 0, enemy:GetMeshCount() - 1 do
+        local jointPosition = enemy:GetJointPosition(jointIndex)
+        if jointPosition.y < eyePosition.y then
+            eyePosition = jointPosition
+        end
+    end
+    local laraHeadPosition = Lara:GetJointPosition(14)
+    local laraTorsoPosition = Lara:GetJointPosition(7)
+    if not hasClearSight(eyePosition, laraHeadPosition) and
+       not hasClearSight(eyePosition, laraTorsoPosition) then
+        return false
+    end
+
+    if isAhead then return true end
+
+    local isSilentWalking = TEN.Input.IsKeyHeld(TEN.Input.ActionID.WALK)
+    if isSilentWalking then return false end
+
+    local laraState = Lara:GetState()
+    local isRunning =
+        laraState == 1 or  -- RUN_FORWARD
+        laraState == 5 or  -- RUN_BACK
+        laraState == 73    -- SPRINT
+
+    return isRunning
+end
+
 -- !Name "If creature target is..."
 -- !Section "Creature AI"
 -- !Description "Checks if creature target is a specified moveable."

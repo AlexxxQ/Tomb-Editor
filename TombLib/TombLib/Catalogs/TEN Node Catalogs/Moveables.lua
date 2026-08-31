@@ -209,7 +209,22 @@ end
 LevelFuncs.Engine.Node.TestMoveableLOS = function(moveableName1, moveableName2)
 	local mov1 = TEN.Objects.GetMoveableByName(moveableName1)
 	local mov2 = TEN.Objects.GetMoveableByName(moveableName2)
-	return TEN.Util.HasLineOfSight(mov1:GetRoom(), mov1:GetPosition(), mov2:GetPosition())
+	local origin = mov1:GetPosition()
+	local target = mov2:GetPosition()
+	local sightVector = target - origin
+	local sightDistance = sightVector:Length()
+
+	if sightDistance <= 0 then return true end
+
+	local ray = TEN.Collision.Ray(
+		origin,
+		mov1:GetRoomNumber(),
+		sightVector:Normalize(),
+		sightDistance,
+		TEN.Collision.IntersectionType.NONE,
+		TEN.Collision.IntersectionType.BOX)
+
+	return not ray:HitRoom() and not ray:HitStatic()
 end
 
 -- !Name "If distance between moveables is..."

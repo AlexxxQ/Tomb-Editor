@@ -38,9 +38,11 @@ TombIDE:
 TEN nodes:
  * Added a node to unswap a previously swapped mesh.
  * Added nodes for checking and setting various aspects of creature AI.
+ * Added nodes for setting creature alerted state and detecting Lara using view direction, line of sight and movement noise.
  * Added a node to check Lara's traversal mode.
  * Updated keypad nodes to use display items and allow conditional numerical input.
  * Fixed CLOCKWORK_BEETLE, EXAMINE and WATERSKIN items not appearing in the inventory nodes.
+ * Fixed the moveable line-of-sight node to use the current collision ray API.
  
 TEN property system updates:
  * Starting hit points for all enemies.
