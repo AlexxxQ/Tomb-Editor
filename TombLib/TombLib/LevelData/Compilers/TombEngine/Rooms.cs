@@ -21,7 +21,6 @@ namespace TombLib.LevelData.Compilers.TombEngine
         private Dictionary<WadPolygon, TombEngineTexInfoManager.Result> _mergedStaticMeshTextureInfos = new Dictionary<WadPolygon, TombEngineTexInfoManager.Result>();
         private Dictionary<ShadeMatchSignature, Vector3> _vertexColors;
 		private Dictionary<Vector3, List<(TombEngineRoom room, int vertexIndex, NormalHelper poly)>> _normalGroups;
-        private Dictionary<Room, VectorInt2> _roomsMinFloorMaxCeilingCache = new Dictionary<Room, VectorInt2>();
         
 		private void BuildRooms(CancellationToken cancelToken)
         {
@@ -44,9 +43,6 @@ namespace TombLib.LevelData.Compilers.TombEngine
                 _roomRemapping.Add(room, _roomUnmapping.Count);
                 _roomUnmapping.Add(room);
                 room.RebuildPortalsCache();
-                _roomsMinFloorMaxCeilingCache.Add(
-                    room,
-                    new VectorInt2(room.GetLowestCorner(), room.GetHighestCorner()));
             }
 
             foreach (var room in _roomRemapping.Keys)
@@ -206,6 +202,9 @@ namespace TombLib.LevelData.Compilers.TombEngine
             var lightEffect = room.Properties.LightEffect;
             var waterPortals = room.PortalsCache.Where(p => (room.Properties.Type == RoomType.Normal && p.Direction == PortalDirection.Floor   && p.AdjoiningRoom.Properties.Type >= RoomType.Water) ||
                                                             (room.Properties.Type >= RoomType.Water  && p.Direction == PortalDirection.Ceiling && p.AdjoiningRoom.Properties.Type == RoomType.Normal)).ToList();
+            var portalMinFloorMaxCeilingCache = room.PortalsCache.ToDictionary(
+                portal => portal,
+                portal => new VectorInt2(portal.Room.GetLowestCorner(portal.Area), portal.Room.GetHighestCorner(portal.Area)));
 
             bool waterSchemeSet = false;
 
@@ -793,15 +792,16 @@ namespace TombLib.LevelData.Compilers.TombEngine
                                             connectionInfo4.TraversableType == Room.RoomConnectionType.TriangularPortalXpZp;
 
                     var pos = new VectorInt3((int)trVertex.Position.X, (int)trVertex.Position.Y, (int)trVertex.Position.Z);
+                    var portalBounds = portalMinFloorMaxCeilingCache[portal];
 
                     // Preemptively disable movement for all portal faces
-                    if (portal.PositionOnPortalFast(pos, false, false, _roomsMinFloorMaxCeilingCache[portal.Room].X, _roomsMinFloorMaxCeilingCache[portal.Room].Y) || 
-                        portal.PositionOnPortalFast(pos, true, false, _roomsMinFloorMaxCeilingCache[portal.Room].X, _roomsMinFloorMaxCeilingCache[portal.Room].Y))
+                    if (portal.PositionOnPortalFast(pos, false, false, portalBounds.X, portalBounds.Y) ||
+                        portal.PositionOnPortalFast(pos, true, false, portalBounds.X, portalBounds.Y))
                         trVertex.Locked = true;
 
                     // A bit complex but working code for water surface movement.
                     // Works better than winroomedit as it takes adjacent portals into account.
-                    if ((waterPortals.Contains(portal) && !portal.PositionOnPortalFast(pos, false, true, _roomsMinFloorMaxCeilingCache[portal.Room].X, _roomsMinFloorMaxCeilingCache[portal.Room].Y)))
+                    if ((waterPortals.Contains(portal) && !portal.PositionOnPortalFast(pos, false, true, portalBounds.X, portalBounds.Y)))
                     {
                         // A candidate vertex must belong to portal sectors, non triangular, not wall, not solid floor
                         if ((isTraversablePortal || isOppositeCorner) &&
@@ -822,7 +822,7 @@ namespace TombLib.LevelData.Compilers.TombEngine
                     if (lightEffect == RoomLightEffect.Mist && portal.Direction == PortalDirection.Floor && isTraversablePortal)
                     {
                         // Assign mist, if set, for vertices inside portal
-                        if (portal.PositionOnPortalFast(pos, true, false, _roomsMinFloorMaxCeilingCache[portal.Room].X, _roomsMinFloorMaxCeilingCache[portal.Room].Y))
+                        if (portal.PositionOnPortalFast(pos, true, false, portalBounds.X, portalBounds.Y))
                         {
                             trVertex = trVertex.SetEffects(room, RoomLightEffect.Glow);
                             break;
@@ -832,8 +832,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
                         ((room.Properties.Type == RoomType.Water || room.Properties.Type == RoomType.Quicksand) != (portal.AdjoiningRoom.Properties.Type == RoomType.Water || portal.AdjoiningRoom.Properties.Type == RoomType.Quicksand)))
                     {
                         // Assign reflection, if set, for all enclosed portal faces
-                        if (portal.PositionOnPortalFast(pos, false, false, _roomsMinFloorMaxCeilingCache[portal.Room].X, _roomsMinFloorMaxCeilingCache[portal.Room].Y) ||
-                            portal.PositionOnPortalFast(pos, true, false, _roomsMinFloorMaxCeilingCache[portal.Room].X, _roomsMinFloorMaxCeilingCache[portal.Room].Y))
+                        if (portal.PositionOnPortalFast(pos, false, false, portalBounds.X, portalBounds.Y) ||
+                            portal.PositionOnPortalFast(pos, true, false, portalBounds.X, portalBounds.Y))
                         {
                             trVertex = trVertex.SetEffects(room, RoomLightEffect.Glow);
                             break;
@@ -842,8 +842,8 @@ namespace TombLib.LevelData.Compilers.TombEngine
 
                     if (lightEffect == RoomLightEffect.Glow || lightEffect == RoomLightEffect.GlowAndMovement)
                     {
-                        if (portal.PositionOnPortalFast(pos, false, false, _roomsMinFloorMaxCeilingCache[portal.Room].X, _roomsMinFloorMaxCeilingCache[portal.Room].Y) || 
-                            portal.PositionOnPortalFast(pos, true, false, _roomsMinFloorMaxCeilingCache[portal.Room].X, _roomsMinFloorMaxCeilingCache[portal.Room].Y))
+                        if (portal.PositionOnPortalFast(pos, false, false, portalBounds.X, portalBounds.Y) ||
+                            portal.PositionOnPortalFast(pos, true, false, portalBounds.X, portalBounds.Y))
                         {
                             // Disable glow for portal faces, if room light interp mode is not sharp-cut
                             if (interpMode != RoomLightInterpolationMode.NoInterpolate)
