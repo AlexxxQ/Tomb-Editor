@@ -38,10 +38,12 @@ end
 
 -- !Name "Clear all controls"
 -- !Section "Input"
--- !Description "Blocks all keys from pushing."
+-- !Description "Blocks all keys from pushing, except an optionally selected control."
+-- !Arguments "Enumeration, 35, [ None | Forward | Back | Left | Right | Step Left | Step Right | Walk | Sprint | Crouch | Jump | Roll | Action | Draw | Look | Accelerate (Vehicle) | Reverse (Vehicle) | Faster (Vehicle) | Slower (Vehicle) | Brake (Vehicle) | Fire (Vehicle) | Flare | Small Medipack | Large Medipack | Previous Weapon | Next Weapon | Weapon 1 | Weapon 2 | Weapon 3 | Weapon 4 | Weapon 5 | Weapon 6 | Weapon 7 | Weapon 8 | Weapon 9 | Weapon 10 | Select | Deselect | Pause | Inventory | Save | Load ], Except"
 
-LevelFuncs.Engine.Node.BlockAllKeys = function()
-	return TEN.Input.ClearAllKeys()
+LevelFuncs.Engine.Node.BlockAllKeys = function(exceptKeyCode)
+	local exceptActionID = (exceptKeyCode and exceptKeyCode > 0) and (exceptKeyCode - 1) or nil
+	return TEN.Input.ClearAllKeys(exceptActionID)
 end
 
 -- !Name "Vibrate game controller"
