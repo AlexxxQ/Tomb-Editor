@@ -49,6 +49,9 @@ WadTool:
  * Added property editor for setting default moveable and static properties in wads.
  * Fixed incorrect grid scroll preview for certain animations in the animation editor.
  * Fixed exception when trying to open an object without meshes in the mesh editor.
+ 
+SoundTool:
+ * Updated TR2 Override with fixes to the sounds for explosive weapons and flares.
 
 TombIDE:
  * Added TR3X support and engine preset (1.11.1).
@@ -76,6 +79,11 @@ TEN property system updates:
  * Foam effect toggle for SPEEDBOAT.
  * Exhaust smoke colors for QUAD.
  * Headlight parameters (color, intensity, radius, falloff, distance and shadow casting) for UPV, MOTORBIKE and JEEP.
+ 
+ TEN base WAD:
+ * Fixed GRENADE_ANIM sound effect order to match classic games. You must update your GRENADE_ANIM object from the base WAD2 for this to take effect.
+ * Fixed HARPOON_ANIM sound effects not playing correctly underwater. You must update your HARPOON_ANIM object from the base WAD2 for this to take effect.
+
  
 Version 1.11
 ============
