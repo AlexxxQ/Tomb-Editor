@@ -38,7 +38,6 @@ Tomb Editor:
  * Fixed floating toolboxes appearing misplaced on high-DPI monitors.
  * Fixed Scale value in Import Settings not being applied when pressing Enter.
  * Fixed missing hit sounds for TR1 creatures in TEN levels.
- * Fixed turn switch flickering in the default TEN wad.
 
 WadTool:
  * Added an option to consolidate textures for an object into a single set of texture pages.
@@ -81,6 +80,7 @@ TEN property system updates:
  * Headlight parameters (color, intensity, radius, falloff, distance and shadow casting) for UPV, MOTORBIKE and JEEP.
  
  TEN base WAD:
+ * Fixed turn switch flickering in the default TEN wad. You must update your LARA object from the base WAD2 for this to take effect. 
  * Fixed GRENADE_ANIM sound effect order to match classic games. You must update your GRENADE_ANIM object from the base WAD2 for this to take effect.
  * Fixed HARPOON_ANIM sound effects not playing correctly underwater. You must update your HARPOON_ANIM object from the base WAD2 for this to take effect.
 
