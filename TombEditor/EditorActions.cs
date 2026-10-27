@@ -1,4 +1,4 @@
-﻿using DarkUI.Forms;
+using DarkUI.Forms;
 using NLog;
 using System;
 using System.Collections.Concurrent;
@@ -4269,11 +4269,19 @@ namespace TombEditor
                         colorDialog.Color = new Vector4(light.Color * 0.5f, 1.0f).ToWinFormsColor();
 
                         var oldLightColor = colorDialog.Color;
-                        if (colorDialog.ShowDialog(owner) != DialogResult.OK)
-                            colorDialog.Color = oldLightColor;
+                        _editor.ToggleHiddenSelection(true);
+                        try
+                        {
+                            if (colorDialog.ShowDialog(owner) != DialogResult.OK)
+                                colorDialog.Color = oldLightColor;
 
-                        _editor.Configuration.ColorDialog_Position = colorDialog.Position;
-                        return colorDialog.Color.ToFloat3Color() * 2.0f;
+                            _editor.Configuration.ColorDialog_Position = colorDialog.Position;
+                            return colorDialog.Color.ToFloat3Color() * 2.0f;
+                        }
+                        finally
+                        {
+                            _editor.ToggleHiddenSelection(false);
+                        }
                     }
                 });
         }
