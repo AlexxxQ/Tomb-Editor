@@ -496,6 +496,8 @@ namespace TombEditor.Controls.Panel3D
 
         private void DrawLights(Effect effect, Room[] roomsWhoseObjectsToDraw, List<Text> textToDraw, List<Sprite> sprites)
         {
+            var hiddenSelection = _editor.Mode == EditorMode.Lighting && _editor.HiddenSelection;
+
             _legacyDevice.SetRasterizerState(_rasterizerWireframe);
             _legacyDevice.SetVertexBuffer(_littleSphere.VertexBuffer);
             _legacyDevice.SetVertexInputLayout(_littleSphere.InputLayout);
@@ -519,7 +521,7 @@ namespace TombEditor.Controls.Panel3D
                     color = new Vector4(1.0f, 1.0f, 0.25f, 1.0f);
                 if (light.Type == LightType.Sun)
                     color = new Vector4(1.0f, 0.5f, 0.0f, 1.0f);
-                if (_highlightedObjects.Contains(light))
+                if (!hiddenSelection && _highlightedObjects.Contains(light))
                     color = _editor.Configuration.UI_ColorScheme.ColorSelection;
 
                 DrawOrQueueServiceObject(light, _littleSphere, color, effect, sprites);
@@ -527,7 +529,8 @@ namespace TombEditor.Controls.Panel3D
 
             // Draw cone, light spheres etc.
 
-            if (_editor.SelectedObject is LightInstance && lights.Contains(_editor.SelectedObject))
+            if (!hiddenSelection &&
+                _editor.SelectedObject is LightInstance && lights.Contains(_editor.SelectedObject))
             {
                 var light = (LightInstance)_editor.SelectedObject;
                 if (ShowLightMeshes)
